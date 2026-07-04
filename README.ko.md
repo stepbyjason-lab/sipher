@@ -95,7 +95,7 @@ Sipher의 AI 보강은 **유료 키 없이 끝까지 돌아가도록** 설계됐
 | **YouTube** | [yt-dlp](https://github.com/yt-dlp/yt-dlp) (Unlicense) | 얇은 래퍼 — `--from-start`·라이브 채팅 replay 결선과 정규화만 자체 |
 | **Facebook** | **저자가 직접 제작** | 라이트박스 우회 풀사이즈 사진·숨은 `+N`장·댓글 수집 — 공개 대체재가 없어 직접 만듦 |
 | **Instagram** | [instaloader](https://github.com/instaloader/instaloader) (MIT) | 라이브러리 직접 호출 + 정직한 access 라벨 계층은 자체 |
-| **TikTok** | [gallery-dl](https://github.com/mikf/gallery-dl) (GPL-2.0) — 영상 다운로드는 gallery-dl이 내부적으로 [yt-dlp](https://github.com/yt-dlp/yt-dlp)에 위임 | subprocess 경계로 호출(코드 비결합) |
+| **TikTok** | [gallery-dl](https://github.com/mikf/gallery-dl) (GPL-2.0) | subprocess 경계로 호출(코드 비결합) |
 | **네이버 블로그** | **저자가 직접 제작** | 순수 표준 라이브러리(무의존) — 모바일 API + 원본 해상도 이미지 |
 | **일반 웹** | [fivetaku/insane-search](https://github.com/fivetaku/insane-search) engine (MIT, 무수정 vendored) | Tier1(WAF 그리드·SSRF 방어)은 engine 그대로. Tier2 JS-render와 자동 승격은 자체 |
 
