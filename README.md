@@ -2,14 +2,21 @@
 
 # Sipher
 
-**Throw any URL or file at it — get back clean, normalized content.**
+**Throw any URL or file at it — get back clean, normalized content.**<br>
+**아무 URL이나 파일을 던지면 — 깨끗하게 정규화된 콘텐츠로 돌려줍니다.**
 
 Sipher is a single entry point for pulling content out of social media, the web, and
 local files. Instead of remembering which scraper works for which platform, you run
 one command and get a consistent, structured result every time.
 
+Sipher는 SNS·웹·로컬 파일에서 콘텐츠를 꺼내는 **단일 진입점**입니다. 어느 플랫폼에
+어느 스크래퍼를 써야 하는지 매번 고민할 필요 없이, 명령 하나로 항상 같은 구조의
+결과를 얻습니다. ([한국어 문서 전체 보기 →](README.ko.md))
+
 **All AI enrichment (vision OCR, speech transcription) runs on free tiers and local
-models — $0 in API costs on the default setup. Paid APIs are strictly opt-in.**
+models — $0 in API costs on the default setup. Paid APIs are strictly opt-in.**<br>
+**AI 보강(비전 OCR·음성 전사)까지 전부 무료 티어 + 로컬 모델로 — 기본 설정 기준
+API 비용 $0. 유료 API는 직접 켜야만 동작하는 옵트인입니다.**
 
 > **Sipher** = *siphon* (pull it in) + *(de)cipher* (clean it up).
 > Siphon any URL, decipher it into clean content.
