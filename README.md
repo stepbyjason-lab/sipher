@@ -109,7 +109,7 @@ runs underneath — and what the author wrote from scratch vs. open source:
 | **YouTube** | [yt-dlp](https://github.com/yt-dlp/yt-dlp) (Unlicense) | Thin wrapper — only the `--from-start` / live-chat-replay wiring and normalization are ours |
 | **Facebook** | **Written by the author** | Lightbox-bypass full-size photos, hidden `+N` shots, comment collection — built from scratch because no public alternative exists |
 | **Instagram** | [instaloader](https://github.com/instaloader/instaloader) (MIT) | Direct library calls + our honest access-label layer |
-| **TikTok** | [gallery-dl](https://github.com/mikf/gallery-dl) (GPL-2.0) | Called across a subprocess boundary (no code linkage) |
+| **TikTok** | [gallery-dl](https://github.com/mikf/gallery-dl) (GPL-2.0) — video downloads are delegated internally to [yt-dlp](https://github.com/yt-dlp/yt-dlp) | Called across a subprocess boundary (no code linkage) |
 | **Naver Blog** | **Written by the author** | Pure standard library (zero deps) — mobile API + original-resolution images |
 | **Generic web** | [fivetaku/insane-search](https://github.com/fivetaku/insane-search) engine (MIT, vendored unmodified) | Tier 1 (WAF grid, SSRF defense) is the engine as-is. Tier 2 JS-render and auto-escalation are ours |
 

@@ -13,7 +13,7 @@
 | [`youtube/`](youtube/) | vendored 없음 — [yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp)(pip, Unlicense) 얇은 래핑 | 설명란·메타·미디어 + `--from-start`(라이브 처음부터) + 라이브 채팅 replay + (옵션)전사·댓글. **MCP 비의존, 100% pip(Unlicense/MIT)** | 구현(build) |
 | [`threads/`](threads/) | [vdite/threads-scraper](https://github.com/vdite/threads-scraper) fork(vendored, MIT) — [우리 fork](https://github.com/stepbyjason-lab/threads-scraper) | **중첩 댓글**(comments[] 실제로 채움) + 미디어 다운로드 + 티어 디스패처(fast pass→불완전 시 deep 크롤 자동 승격) | 구현+라이브 검증(round-02 Gate5 PASS_WITH_FOLLOWUPS) |
 | [`instagram/`](instagram/) | vendored 없음 — [instaloader/instaloader](https://github.com/instaloader/instaloader)(pip, MIT) 직접 호출 | 캡션·미디어·메타 + **로그인 세션 사실상 필수**(round-10 정정, IG가 익명 접근을 거의 항상 403 차단) + `InstagramAccessError.access_label`로 정직 판별 | 구현(round-09) → 로그인 필수 재포지셔닝(round-10 §④) |
-| [`tiktok/`](tiktok/) | vendored 없음 — [mikf/gallery-dl](https://github.com/mikf/gallery-dl)(pip, **GPL-2.0**) subprocess 직접 호출(경계라 전파 없음, §라이선스 원칙 참조) | 캡션(desc)+통계+메타, 영상 다운로드 opt-in | 구현+라이브 검증(round-09) → 라이선스 표기 보완(round-10 §⑤) |
+| [`tiktok/`](tiktok/) | vendored 없음 — [mikf/gallery-dl](https://github.com/mikf/gallery-dl)(pip, **GPL-2.0**) subprocess 직접 호출(경계라 전파 없음, §라이선스 원칙 참조) · 영상 다운로드는 gallery-dl이 내부적으로 [yt-dlp](https://github.com/yt-dlp/yt-dlp)에 위임 | 캡션(desc)+통계+메타, 영상 다운로드 opt-in | 구현+라이브 검증(round-09) → 라이선스 표기 보완(round-10 §⑤) |
 | [`web/`](web/) | `web/engine/`만 vendored — [fivetaku/insane-search](https://github.com/fivetaku/insane-search)(MIT) | 6플랫폼 host 미매칭 시 **범용 폴백**. Tier1(curl_cffi WAF 그리드, engine 내장 SSRF 방어) + Tier2(Python playwright JS-render, SSR 껍데기 의심 시 자동 승격) | 구현+라이브 검증(round-10) |
 
 ## 공통 규약
