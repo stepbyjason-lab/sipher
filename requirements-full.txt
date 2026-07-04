@@ -1,0 +1,21 @@
+# sipher FULL 프로필 — LITE 전부 + 개인 로그인 세션이 필요한 어댑터.
+# 대상: 본인(신뢰 대상), 브라우저 로그인 세션·GPU(whisper large-v3) 준비 가능한 환경.
+# docs/08-packaging.md 참조.
+#
+# 설치: scripts/setup.sh full / scripts/setup.ps1 -Profile full
+#       또는 직접: pip install -r requirements-full.txt
+
+-r requirements-lite.txt
+
+# threads: playwright(헤드리스 크롤) + parsel(임베디드 JSON 추출). deep 크롤 시 로그인 권장.
+-r adapters/threads/requirements.txt
+
+# facebook: playwright(브라우저 자동화 + 인증 context) — 개인 로그인 세션 필수.
+-r adapters/facebook/requirements.txt
+
+# instagram: instaloader — 개인 로그인 세션 사실상 필수(익명 접근 대부분 403).
+-r adapters/instagram/requirements.txt
+
+# whisper 전사(core/transcribe.py)와 ffmpeg는 시스템 도구(subprocess 호출)라
+# pip manifest로 표현 불가. GPU(large-v3 권장) 준비물은 docs/08-packaging.md
+# "필요한 것" 섹션 참조 — 이 파일에는 넣을 수 없다.

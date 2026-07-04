@@ -1,0 +1,6 @@
+# sipher-youtube 어댑터 의존성 (manifest — 설치는 사용자/승인 게이트)
+yt-dlp>=2025.1            # 필수: 메타·미디어·자막·라이브채팅·--from-start (Unlicense)
+# 선택(옵션 기능 — 미설치 시 해당 기능만 skip):
+# youtube-transcript-api>=0.6      # --with-transcript (정제 전사, MIT, 키 불필요)
+# youtube-comment-downloader>=0.1  # --with-comments (댓글, MIT, 키 불필요)
+# ffmpeg (시스템 패키지): 포맷 병합·자막 변환 권장 — 없으면 degrade

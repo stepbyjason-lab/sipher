@@ -1,0 +1,27 @@
+# ── 시크릿 (절대 커밋 금지) ──
+# .env* 로 넓게(공백·한글 든 사본 "".env - 복사본.local"" 까지 커버) — !.env.example만 예외
+.env*
+!.env.example
+# facebook 어댑터 세션/쿠키(루트)
+.fbprofile/
+.fbmedia/
+Codesipher.fbprofile/
+# threads 어댑터 쿠키
+adapters/threads/threads_cookies.json
+**/threads_cookies.json
+
+# ── 수집 산출물/작업 파일 ──
+scratchpad/
+downloads/
+**/media/
+**/out/
+**/*.normalized.json
+
+# ── 패키징 산출물(round-15) ──
+dist/
+
+# ── python ──
+__pycache__/
+*.pyc
+.venv/
+.venv-*/
