@@ -75,6 +75,7 @@ def normalize(post: dict, *, source: str) -> dict:
         "platform": "naver_blog",
         "body_text": post.get("body_text", ""),
         "comments": [],          # 네이버 블로그 댓글은 별도 API(범위 밖, follow-up)
+                                  # comments_label="unsupported"로 정직 노출(round-34 D)
         "ocr_text": [],          # sipher 정규화 단계(어댑터 밖)에서 채움
         "transcript": None,
         "media_paths": post.get("media_paths", []),
@@ -84,6 +85,7 @@ def normalize(post: dict, *, source: str) -> dict:
             "add_date": post.get("add_date"),
             "category": post.get("category"),
             "comment_count": post.get("comment_count"),
+            "comments_label": "unsupported",  # round-34 D: 첫댓글 수집 미지원 어댑터 정직 라벨
             "read_count": post.get("read_count"),
             "like_count": post.get("like_count"),
             "image_count": len(post.get("image_urls", [])),

@@ -220,6 +220,10 @@ def _transcribe_local(
             args += ["--compute", compute]
 
         try:
+            # whisper 도구는 transcript를 파일(<stem>.txt)로 쓰고 아래에서 read_text(utf-8)로
+            # 읽는다. 그 도구는 이미 `encoding="utf-8"`로 파일을 명시 기록하므로(외부 리뷰
+            # Codex가 도구 소스 확인) PYTHONUTF8은 no-op이라 넣지 않는다. IOENCODING만 둔다
+            # — 실패 시 캡처하는 stderr(한글 오류메시지)를 깨짐 없이 읽기 위함(무해·일관).
             proc = subprocess.run(
                 args,
                 cwd=str(tool_dir),
@@ -229,6 +233,7 @@ def _transcribe_local(
                 errors="replace",
                 timeout=timeout,
                 shell=False,
+                env={**os.environ, "PYTHONIOENCODING": "utf-8"},
             )
         except subprocess.TimeoutExpired as e:
             _log.warning("whisper 전사 타임아웃(%ds 초과): %s", timeout, media_path.name)
@@ -254,7 +259,12 @@ def _transcribe_local(
                 f"whisper 출력 파일이 없습니다: {txt_path} "
                 f"(stdout: {_truncate(proc.stdout)})"
             )
-        text = txt_path.read_text(encoding="utf-8").strip()
+        try:
+            text = txt_path.read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError) as e:
+            raise TranscribeError(
+                f"whisper 출력 파일 읽기 실패: {txt_path.name} ({type(e).__name__})"
+            ) from e
 
     used_model = model or "large-v3"  # 도구 자체 기본값(미지정 시)과 동일 표기
     _log.info("whisper(local) 전사 완료: %s (model=%s)", media_path.name, used_model)
@@ -292,6 +302,9 @@ def _extract_audio(media_path: Path, *, outdir: Path) -> Path:
         str(out_path),
     ]
     try:
+        # ffmpeg는 비-python이라 PYTHONIOENCODING/PYTHONUTF8이 no-op이고, stdout도 로그뿐
+        # (콘텐츠 미파싱, 오디오는 파일로 출력). 부모 utf-8 디코딩만 유지하고 env는 강제하지
+        # 않는다(no-op 제거 — R32 외부 리뷰 반영).
         proc = subprocess.run(
             args,
             capture_output=True,
@@ -323,7 +336,12 @@ def _prepare_upload_path(media_path: Path, *, tmpdir: Path) -> Path | None:
     3. ffmpeg가 없거나 추출 후에도 25MB를 초과하면 HTTP 요청 없이 None(skip).
     """
     ext = media_path.suffix.lower()
-    size = media_path.stat().st_size
+    try:
+        size = media_path.stat().st_size
+    except OSError as e:
+        raise TranscribeError(
+            f"Groq 업로드 파일 검사 실패: {media_path.name} ({type(e).__name__})"
+        ) from e
     needs_extraction = ext in _VIDEO_CONTAINER_EXTS or size > _GROQ_MAX_UPLOAD_BYTES
     unsupported = ext not in _GROQ_SUPPORTED_EXTS
 
@@ -342,7 +360,13 @@ def _prepare_upload_path(media_path: Path, *, tmpdir: Path) -> Path | None:
     except TranscribeError as e:
         _log.warning("Groq 업로드용 오디오 추출 실패 — skip: %s (%s)", media_path.name, e)
         return None
-    if extracted.stat().st_size > _GROQ_MAX_UPLOAD_BYTES:
+    try:
+        extracted_size = extracted.stat().st_size
+    except OSError as e:
+        raise TranscribeError(
+            f"Groq 추출 파일 검사 실패: {extracted.name} ({type(e).__name__})"
+        ) from e
+    if extracted_size > _GROQ_MAX_UPLOAD_BYTES:
         _log.info(
             "Groq 업로드 사전검사: 오디오 추출 후에도 25MB 초과 — 정직 skip(%s)",
             media_path.name,
@@ -401,6 +425,10 @@ def _call_groq(
         raise TranscribeError(
             f"Groq 전사 네트워크 오류: {_redact(str(e), api_key)}"
         ) from e
+    except OSError as e:
+        raise TranscribeError(
+            f"Groq 업로드 파일 열기 실패: {upload_path.name} ({type(e).__name__})"
+        ) from e
 
     if resp.status_code == 429:
         raise _GroqRateLimited(
@@ -424,10 +452,11 @@ def _call_groq(
     try:
         payload = resp.json()
         text = payload["text"]
-    except (ValueError, KeyError) as e:
+        text = text.strip()
+    except (ValueError, KeyError, TypeError, AttributeError) as e:
         raise TranscribeError(f"Groq 응답 파싱 실패: {type(e).__name__}") from e
 
-    return {"text": text.strip(), "model": model}
+    return {"text": text, "model": model}
 
 
 def _transcribe_groq(media_path: Path, *, lang: str) -> dict:
@@ -501,7 +530,10 @@ def transcribe_media(
     `model`/`device`/`compute`는 local backend 전용 인자다(round-06 계승) — Groq
     폴백 시에는 무시된다(Groq는 자체 모델 사다리 turbo→v3를 쓴다, 계약 §사다리).
     """
-    media_path = Path(path)
+    try:
+        media_path = Path(path)
+    except TypeError as e:
+        raise TranscribeError(f"잘못된 미디어 경로 타입: {type(path).__name__}") from e
     if not media_path.exists():
         raise TranscribeError(f"미디어 파일이 없습니다: {media_path}")
     if lang is None:

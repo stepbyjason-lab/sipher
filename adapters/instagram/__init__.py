@@ -33,6 +33,7 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
+from itertools import islice
 from pathlib import Path
 from typing import Literal
 
@@ -42,6 +43,11 @@ _log = logging.getLogger(__name__)
 
 MediaLabel = Literal["none", "downloaded", "partially_downloaded", "download_failed"]
 CommentsLabel = Literal["not_requested", "collected", "login_required", "fetch_failed"]
+# round-B: comments=True의 의미를 "가능한 댓글 수집"에서 "첫 댓글 1개만 수집"으로
+# 축소한다(.handoff/rounds/round-B-first-comment-mode-contract.md). comments_label은
+# 기존 의미를 유지(성공/실패/권한 판정) — comment_collection_mode가 "정책상 몇 개를
+# 시도했는가"를 별도로 정직하게 표시한다.
+CommentCollectionMode = Literal["not_requested", "first_only"]
 # round-10 Post-Review Fix(P2): 로그인 세션(session_file 지정) 사용 중 실패해도
 # "anonymous_blocked"로 고정돼 있어 호출자가 "익명이라 차단됐다"고 오판할 수 있던
 # 문제(round-10 독립 리뷰 P2). "session_failed"를 추가해 익명 차단과 로그인 세션
@@ -70,6 +76,9 @@ class InstagramAccessError(RuntimeError):
 # 동일한 shortcode 스킴을 쓴다(instaloader Post.from_shortcode가 셋 다 처리).
 _HOST = re.compile(r"^(?:https?://)?(?:www\.)?instagram\.com/", re.I)
 _POST_PATH = re.compile(r"/(?:p|reel|tv)/(?P<code>[A-Za-z0-9_-]+)", re.I)
+
+# 미디어(이미지/영상) 다운로드 상한 — 자원 고갈 차단(naver_blog와 동일 값).
+_MAX_MEDIA_BYTES = 300 << 20
 
 
 def parse_url(url: str) -> str:
@@ -130,12 +139,91 @@ def _build_context(session_file: str | Path | None):
     return L, instaloader
 
 
-def _media_label(media_paths: list[str], *, has_media: bool, downloaded: bool) -> MediaLabel:
+def _media_label(
+    media_paths: list[str], *, has_media: bool, downloaded: bool, expected: int = 1
+) -> MediaLabel:
     if not downloaded:
         return "none"
     if not has_media:
         return "none"
-    return "downloaded" if media_paths else "download_failed"
+    if not media_paths:
+        return "download_failed"
+    if expected > 0 and len(media_paths) < expected:
+        return "partially_downloaded"  # round-34 §C: 캐러셀 일부만 받음 — 정직 노출
+    return "downloaded"
+
+
+def _collect_first_instagram_comment(post) -> list[dict]:
+    """post.get_comments() lazy iterator에서 첫 1개만 소비 → 변환된 댓글 list.
+
+    round-B(.handoff/rounds/round-B-first-comment-mode-contract.md): comments=True의
+    의미를 "가능한 댓글 수집"에서 "첫 댓글 1개만 수집"으로 축소한다. instaloader
+    4.15.1(설치 버전) 소스 확인 결과 `Post.get_comments()`는 케이스에 따라:
+    - 댓글 수가 많으면 `NodeIterator`(GraphQL pagination) 또는
+      `_get_comments_via_iphone_endpoint()`를 반환 — 순회할 때마다 다음 페이지를
+      추가 네트워크 요청으로 가져오는 **진짜 lazy pagination iterator**.
+    - 포스트 메타데이터가 이미 전체 댓글을 포함하면(`self.comments ==
+      len(comment_edges) + answers_count`) 이미 메모리에 있는 plain `list`를 반환
+      (이 경우는 추가 네트워크 비용이 원래 없다).
+    `itertools.islice(..., 1)`로 첫 1개만 소비하면 앞의 pagination 케이스에서
+    2페이지째 이후 HTTP 요청이 발생하지 않는다 — `list(post.get_comments())[:1]`은
+    iterator를 전량 소비해 이 목적을 위반하므로 사용하지 않는다(계약 §주의).
+
+    빈 iterator(댓글 0개)에도 IndexError 없이 빈 list를 반환한다(Amendment P2 —
+    "댓글 0개 엣지케이스").
+    """
+    return [
+        {
+            "id": c.id,
+            "author": c.owner.username if c.owner else None,
+            "text": c.text or "",
+            "likes_count": getattr(c, "likes_count", 0),
+            "created_at_utc": c.created_at_utc.isoformat() if c.created_at_utc else None,
+        }
+        for c in islice(post.get_comments(), 1)
+    ]
+
+
+def _resolve_instagram_comments(
+    post, comments: bool, instaloader_module,
+) -> tuple[list[dict], CommentsLabel, CommentCollectionMode]:
+    """comments 플래그 → (collected_comments, comments_label, comment_collection_mode).
+
+    round-B Post-Review Fix(P2, Codex 지적): `fetch()`의 `if comments: ... else:
+    ...` 분기를 이 헬퍼로 뽑아낸 이유는 순수히 테스트 가능성 때문이다 — 기존
+    `test_comments_false_never_calls_get_comments`는 `fetch()`를 통하지 않고
+    `collected_comments = []`를 직접 손으로 구성해 `normalize()`에 넘겼기 때문에
+    "comments=False면 get_comments()가 호출되지 않는다"는 실제 코드 경로를
+    검증하지 못하고 있었다(normalize()가 입력을 그대로 반영한다는 것만 증명).
+    이 헬퍼가 생기면 테스트는 `_resolve_instagram_comments(post, comments=False,
+    ...)`를 직접 호출해 poison iterator가 실제로 안 불린다는 것을 검증할 수 있다
+    (facebook `_maybe_fetch_comments()`가 이미 이 패턴으로 올바르게 테스트되고
+    있었음 — round-B 최초 구현에서 IG 쪽만 이 실수를 했다).
+
+    instaloader_module은 `fetch()`가 이미 `_build_context()`로 얻은 `instaloader`
+    모듈 객체를 그대로 받는다(순환 import 없이 예외 타입에 접근하기 위함 — 이
+    헬퍼 자체는 instaloader를 top-level import하지 않는다, 모듈 전체의 지연
+    임포트 원칙 유지).
+    """
+    collected_comments: list[dict] = []
+    comments_label: CommentsLabel = "not_requested"
+    comment_collection_mode: CommentCollectionMode = (
+        "first_only" if comments else "not_requested"
+    )
+    if not comments:
+        return collected_comments, comments_label, comment_collection_mode
+
+    try:
+        collected_comments = _collect_first_instagram_comment(post)
+        comments_label = "collected"
+    except instaloader_module.exceptions.LoginRequiredException:
+        comments_label = "login_required"
+    except instaloader_module.exceptions.ConnectionException:
+        comments_label = "login_required"  # 익명 차단도 사실상 로그인 요구와 동일한 결과
+    except Exception as e:  # 정직 degrade — 원인 로그는 남기되 fetch 자체는 죽이지 않음
+        _log.warning("instagram: 댓글 수집 실패(%s): %s", type(e).__name__, e)
+        comments_label = "fetch_failed"
+    return collected_comments, comments_label, comment_collection_mode
 
 
 def fetch(
@@ -156,11 +244,19 @@ def fetch(
     - session_file 지정(opt-in): 로그인 세션으로 시도(실계정 테스트는 스코프 밖 —
       인터페이스만 제공, threads의 cookie 파일 패턴과 동일 경계).
     - comments=False(기본): get_comments()를 아예 호출하지 않는다(불필요한 IG
-      요청 방지 — 익명 상태에서 추가 403 유발을 피함).
-    - comments=True: get_comments() 시도. 실패 시 comments=[]로 두고
-      meta.comments_label="login_required"(또는 "fetch_failed")로 정직 degrade —
-      절대 조용히 빈 리스트만 반환하지 않는다(라벨로 원인 명시).
-    - download=True: media_dir(기본 "downloads")에 이미지/영상 1건 다운로드.
+      요청 방지 — 익명 상태에서 추가 403 유발을 피함). meta.comment_collection_mode
+      ="not_requested".
+    - comments=True(round-B: "첫 댓글 1개만"): `post.get_comments()` lazy iterator에서
+      `itertools.islice(..., 1)`로 첫 1개만 소비한다(2페이지째 이후 IG 네트워크
+      요청 발생 안 함 — 상세: `_collect_first_instagram_comment` docstring).
+      성공 시 `comments`의 길이는 0(댓글이 원래 0개) 또는 1이다. 실패 시
+      comments=[]로 두고 meta.comments_label="login_required"(또는
+      "fetch_failed")로 정직 degrade — 절대 조용히 빈 리스트만 반환하지 않는다
+      (라벨로 원인 명시). meta.comment_collection_mode="first_only"는 성공/실패와
+      무관하게 "정책상 첫 댓글만 시도했다"는 사실 자체를 표시한다(계약 §고정 meta
+      필드명 — comments_label과 comment_collection_mode는 서로 다른 축).
+    - download=True: media_dir(기본 "downloads")에 다운로드 — 캐러셀은 전 항목,
+      단일 포스트는 미디어 1건(round-34 §C — 이전엔 캐러셀도 대표 1건만 받았다).
       CDN URL은 서명·시간제한이라 스크랩 직후 받지 않으면 만료된다(threads와 동일).
 
     보안 경고(trusted input): media_dir/session_file은 로컬 사용자가 지정하는 신뢰
@@ -229,28 +325,15 @@ def fetch(
             access_label="session_failed",
         ) from e
 
-    collected_comments: list[dict] = []
-    comments_label: CommentsLabel = "not_requested"
-    if comments:
-        try:
-            collected_comments = [
-                {
-                    "id": c.id,
-                    "author": c.owner.username if c.owner else None,
-                    "text": c.text or "",
-                    "likes_count": getattr(c, "likes_count", 0),
-                    "created_at_utc": c.created_at_utc.isoformat() if c.created_at_utc else None,
-                }
-                for c in post.get_comments()
-            ]
-            comments_label = "collected"
-        except instaloader.exceptions.LoginRequiredException:
-            comments_label = "login_required"
-        except instaloader.exceptions.ConnectionException:
-            comments_label = "login_required"  # 익명 차단도 사실상 로그인 요구와 동일한 결과
-        except Exception as e:  # 정직 degrade — 원인 로그는 남기되 fetch 자체는 죽이지 않음
-            _log.warning("instagram: 댓글 수집 실패(%s): %s", type(e).__name__, e)
-            comments_label = "fetch_failed"
+    # round-B: comment_collection_mode는 comments_label과 별개 축 — "성공/실패"가
+    # 아니라 "정책상 몇 개를 시도했는가"를 표시한다(계약 §고정 meta 필드명). 이
+    # 블록은 _resolve_instagram_comments()로 위임한다(round-B Post-Review Fix(P2)
+    # — 헬퍼 docstring 참조: comments=False 분기가 실제로 get_comments()를
+    # 호출하지 않는다는 것을 fetch() 전체를 mocking하지 않고도 단위 테스트할 수
+    # 있게 하기 위함).
+    collected_comments, comments_label, comment_collection_mode = (
+        _resolve_instagram_comments(post, comments, instaloader)
+    )
 
     out_dir = str(media_dir) if media_dir else "downloads"
     media_paths: list[str] = []
@@ -264,6 +347,7 @@ def fetch(
         code=code,
         comments=collected_comments,
         comments_label=comments_label,
+        comment_collection_mode=comment_collection_mode,
         media_paths=media_paths,
         downloaded=download,
         has_media=has_media,
@@ -277,30 +361,96 @@ def _ext_from_url(url: str, default: str) -> str:
     return "." + m.group(1).lower() if m else default
 
 
-def _download_media(post, *, out_dir: str, code: str) -> list[str]:
-    """post의 대표 미디어(이미지 또는 영상) 1건을 다운로드. 캐러셀은 첫 항목만
-    (round-09 비목표 — 캐러셀 심화 처리는 범위 밖, docs/00-overview.md §비목표).
-    실패해도 예외를 올리지 않고 빈 리스트를 반환(media_label로 상위에서 판별).
+class _SidecarEnumerationFailed(Exception):
+    """캐러셀(GraphSidecar)로 확인됐으나 하위 노드 열거가 실패함(round-34 재게이트 P0)."""
+
+
+def _sidecar_nodes(post) -> list:
+    """캐러셀(GraphSidecar)이면 하위 노드 목록을, 캐러셀이 아니면 빈 리스트를 돌려준다.
+
+    `typename`으로 먼저 "캐러셀인가"를 판정한다 — 이전엔 `get_sidecar_nodes()`의 모든
+    예외를 삼켜 "캐러셀 아님"과 "캐러셀인데 열거 실패"를 구분하지 못했다(재게이트 실측:
+    열거 실패 시 대표 1건만 받고도 `media_label="downloaded"`·`ocr_label="done"`으로
+    성공을 위장 — 캐러셀 나머지가 조용히 사라짐). 진짜 열거 실패는
+    `_SidecarEnumerationFailed`로 명시해 호출부가 "개수 불명"을 "0개"로 위장하지 않게 한다.
     """
-    import urllib.request
+    if getattr(post, "typename", None) != "GraphSidecar":
+        return []
+    try:
+        return list(post.get_sidecar_nodes())
+    except Exception as e:
+        raise _SidecarEnumerationFailed(str(e)) from e
+
+
+def _media_counts(post) -> tuple[int | None, int | None]:
+    """(image_count, video_count) — 다운로드 전 메타 조회만으로 계산(round-34 §C).
+
+    캐러셀은 각 sidecar 노드의 is_video로 집계, 단일 포스트는 post.is_video로 판정.
+    캐러셀 열거가 실패하면 `(None, None)`을 돌려준다 — "0개"(원래 없음)로 위장하지
+    않는다. `enrich_ocr`이 이 값과 실제 다운로드 수를 대조해 not_downloaded/partial을
+    구분한다.
+    """
+    try:
+        nodes = _sidecar_nodes(post)
+    except _SidecarEnumerationFailed as e:
+        _log.warning("instagram: 캐러셀 열거 실패(%s) — 개수 불명으로 정직 표기", e)
+        return None, None
+    if nodes:
+        videos = sum(1 for n in nodes if bool(getattr(n, "is_video", False)))
+        return len(nodes) - videos, videos
+    return (0, 1) if bool(getattr(post, "is_video", False)) else (1, 0)
+
+
+def _download_media(post, *, out_dir: str, code: str) -> list[str]:
+    """캐러셀은 전 항목을, 단일 포스트는 대표 미디어 1건을 다운로드(round-34 §C —
+    이전엔 캐러셀도 대표 1건만 받아 나머지가 ocr_label="done" 뒤에 숨는 silent-loss였다).
+    항목별 실패는 그 항목만 건너뛴다 — 부분 실패도 media_label(partially_downloaded)로
+    상위에서 정직 노출한다. 캐러셀 열거 자체가 실패하면(재게이트 P0) 무엇을 받아야
+    할지 모르므로 다운로드를 시도하지 않고 빈 리스트를 돌려준다 — 대표 1건을 받고
+    "성공"으로 위장하지 않는다. 예외를 올리지 않고 성공분만 반환.
+
+    round-33: 다운로드는 core.media_io.download_to_file(스트리밍+상한+원자적 rename)로
+    수행한다 — 재fetch 실패 시(네트워크 중단 등) 이미 받아둔 캐시 파일을 절대 훼손하지
+    않는다(0바이트로 자르는 직접 open(dest,"wb")를 더 이상 쓰지 않음).
+    """
+    from core.media_io import download_to_file
 
     os.makedirs(out_dir, exist_ok=True)
     try:
-        url = post.video_url if post.is_video else post.url
-    except Exception as e:
-        _log.warning("instagram: 미디어 URL 조회 실패(%s): %s", type(e).__name__, e)
+        nodes = _sidecar_nodes(post)
+    except _SidecarEnumerationFailed as e:
+        _log.warning("instagram: 캐러셀 열거 실패(%s) — 다운로드 시도 안 함(정직 실패)", e)
         return []
-    if not url:
-        return []
-    dest = os.path.join(out_dir, f"ig_{code}{_ext_from_url(url, '.jpg' if not post.is_video else '.mp4')}")
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=60) as resp, open(dest, "wb") as f:
-            f.write(resp.read())
-        return [dest]
-    except Exception as e:
-        _log.warning("instagram: 다운로드 실패(%s): %s", type(e).__name__, e)
-        return []
+    items: list[tuple[int, str | None, bool]] = []
+    if nodes:
+        for idx, node in enumerate(nodes, start=1):
+            is_video = bool(getattr(node, "is_video", False))
+            url = getattr(node, "video_url", None) if is_video else None
+            url = url or getattr(node, "display_url", None) or getattr(node, "url", None)
+            items.append((idx, url, is_video))
+    else:
+        try:
+            is_video = bool(post.is_video)
+            url = post.video_url if is_video else post.url
+        except Exception as e:
+            _log.warning("instagram: 미디어 URL 조회 실패(%s): %s", type(e).__name__, e)
+            return []
+        items.append((1, url, is_video))
+
+    paths: list[str] = []
+    for idx, url, is_video in items:
+        if not url:
+            continue
+        suffix = _ext_from_url(url, ".mp4" if is_video else ".jpg")
+        dest = os.path.join(out_dir, f"ig_{code}_{idx:02d}{suffix}" if nodes else f"ig_{code}{suffix}")
+        ok = download_to_file(
+            url, Path(dest),
+            headers={"User-Agent": "Mozilla/5.0"},
+            max_bytes=_MAX_MEDIA_BYTES,
+        )
+        if ok:
+            paths.append(dest)
+    return paths
 
 
 def normalize(
@@ -310,6 +460,7 @@ def normalize(
     code: str,
     comments: list[dict],
     comments_label: CommentsLabel,
+    comment_collection_mode: CommentCollectionMode,
     media_paths: list[str],
     downloaded: bool,
     has_media: bool,
@@ -319,7 +470,12 @@ def normalize(
 
     OCR/전사는 이 단계에서 채우지 않는다(sipher 정규화 단계에서 opt-in enrich,
     core/__init__.py fetch(ocr=, transcribe=) 참조 — threads/naver_blog와 동일).
+
+    round-B: `comment_collection_mode`는 `comments_label`을 대체하지 않는
+    별도 축이다 — "정책상 몇 개를 시도했는가"("not_requested" | "first_only")를
+    표시하고, 실제 성공/실패/권한 문제는 기존 `comments_label`이 표현한다.
     """
+    image_count, video_count = _media_counts(post)
     return {
         "source": source,
         "platform": "instagram",
@@ -336,8 +492,14 @@ def normalize(
             "comment_count": getattr(post, "comments", 0),
             "comment_count_captured": len(comments),
             "comments_label": comments_label,
+            "comment_collection_mode": comment_collection_mode,
             "is_video": bool(getattr(post, "is_video", False)),
-            "media_label": _media_label(media_paths, has_media=has_media, downloaded=downloaded),
+            "image_count": image_count,   # round-34 §C: enrich_ocr 완전성 대조용 사전신호
+            "video_count": video_count,
+            "media_label": _media_label(
+                media_paths, has_media=has_media, downloaded=downloaded,
+                expected=(image_count + video_count) if image_count is not None else 0,
+            ),
             "ig_access_label": access_label,
             "date_utc": post.date_utc.isoformat() if getattr(post, "date_utc", None) else None,
             "fetched_at": datetime.now(timezone.utc).isoformat(),

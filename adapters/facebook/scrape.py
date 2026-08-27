@@ -350,7 +350,8 @@ def _parse_comment_text(raw_text: str) -> dict:
 
 
 def extract_comments(page: Page, caption_snippet: str | None = None, *,
-                     max_expand: int = _MAX_EXPAND_CLICKS) -> tuple[list[dict], str]:
+                     max_expand: int = _MAX_EXPAND_CLICKS,
+                     limit: int | None = None) -> tuple[list[dict], str]:
     """현재 page(permalink 방문 완료)에서 댓글[] + 라벨을 추출. permalink 미방문 시 결과 미정.
 
     caption_snippet: 본문 article 식별용 캡션 텍스트 일부(§③ — 순수 인덱스 기반 구분은
@@ -368,8 +369,20 @@ def extract_comments(page: Page, caption_snippet: str | None = None, *,
     parse_fail=0이면 라벨이 "collected"(완전 수집)로 오분류될 수 있었다.
     (c)를 별도 `expand_interrupted` 플래그로 구분해 (b)와 함께 "미완료" 신호로
     묶는다 — 자연완료(a)만 "완료"로 인정한다.
+
+    round-B(.handoff/rounds/round-B-first-comment-mode-contract.md): `limit` 추가 —
+    지정되면 유효 댓글이 `limit`개에 도달하는 즉시 candidate 파싱 loop를 중단한다
+    (`raw_candidates` 전체를 파싱할 필요가 없음). `max_expand=0`으로 호출하면 위
+    "답글 N개" 확장 클릭 루프 자체가 range(0)이라 자연히 0회 실행된다(전용 skip
+    분기를 새로 만들지 않고 기존 루프의 경계값으로 처리 — 최소 변경). `_COLLECT_COMMENTS_JS`는
+    본문 이후 댓글 후보를 **DOM 표시 순서대로** 반환하므로(계약 §Facebook 사전조사)
+    `raw_candidates`의 앞쪽부터 순서대로 보는 것이 곧 "화면상 첫 댓글부터" 보는 것과
+    동일하다 — 첫 candidate가 파싱 실패(빈 텍스트)해도 다음 candidate로 계속 진행해
+    "표시 순서 기준 첫 유효 댓글"을 반환한다(계약 §Facebook 필수변경 마지막 항목).
     """
     # 지연로딩 대비: "답글 N개" 확장을 보수적 상한 안에서 클릭 → DOM 갱신 대기.
+    # limit이 걸린 first-only 모드는 max_expand=0으로 호출되므로 range(0)이 되어
+    # 루프 본문이 전혀 실행되지 않는다 — 별도 분기 없이도 확장 클릭이 스킵된다.
     expand_hit_cap = False
     expand_interrupted = False  # 예외로 인한 강제 중단(미완료) — 자연완료(버튼 소진)와 구분
     try:
@@ -388,7 +401,7 @@ def extract_comments(page: Page, caption_snippet: str | None = None, *,
                 _log.debug("답글 확장 클릭 실패(중단) — %s", type(exc).__name__)
                 expand_interrupted = True
                 break
-        if clicked >= max_expand:
+        if clicked >= max_expand > 0:
             expand_hit_cap = True
     except Exception as exc:  # locator 자체 실패 — 확장 미완료로 간주(치명적은 아니나 정직 라벨 유지)
         _log.debug("답글 확장 탐색 실패(계속) — %s", type(exc).__name__)
@@ -407,6 +420,8 @@ def extract_comments(page: Page, caption_snippet: str | None = None, *,
     comments: list[dict] = []
     parse_fail = 0
     for cand in raw_candidates:
+        if limit is not None and len(comments) >= limit:
+            break  # round-B: 요청한 개수만큼 모았으면 나머지 candidate는 안 본다(조기 종료)
         parsed = _parse_comment_text(cand.get("raw_text") or "")
         if not parsed["text"]:
             parse_fail += 1
@@ -551,7 +566,8 @@ def scrape_profile(ctx: BrowserContext, target: str, *,
 
 def enrich_post_comments(ctx: BrowserContext, permalink: str, *,
                          caption_snippet: str | None = None,
-                         max_expand: int = _MAX_EXPAND_CLICKS) -> dict:
+                         max_expand: int = _MAX_EXPAND_CLICKS,
+                         limit: int | None = None) -> dict:
     """permalink 1건 → 댓글 보강 결과 dict(round-14). enrich_post_images와 동일 골격.
 
     인증된 ctx로 permalink를 **재방문**(refetch_images/video와 별도 page — 기존 검증된
@@ -559,6 +575,9 @@ def enrich_post_comments(ctx: BrowserContext, permalink: str, *,
     caption_snippet 미지정 시 페이지 본문 텍스트 앞부분을 자동 사용(호출측이 이미 본문을
     안다면 넘겨서 재추출 생략 가능 — __init__.py가 img.get("text")를 전달).
     반환: {comments: list[dict], comments_label: str}.
+
+    round-B: `limit`을 그대로 `extract_comments()`에 전달한다(첫 댓글 모드에서
+    `__init__.py._maybe_fetch_comments()`가 `limit=1, max_expand=0`으로 호출).
     """
     url = resolve_target(permalink)  # facebook.com 외 거부(입력검증/SSRF) — extract_comments 진입 전 방어
     page = ctx.new_page()
@@ -591,7 +610,7 @@ def enrich_post_comments(ctx: BrowserContext, permalink: str, *,
                 _log.debug("캡션 자동추출 실패(폴백 진행) — %s", type(exc).__name__)
                 snippet = None
 
-        comments, label = extract_comments(page, snippet, max_expand=max_expand)
+        comments, label = extract_comments(page, snippet, max_expand=max_expand, limit=limit)
     except Exception as exc:  # 페이지 로딩/네비게이션 실패 — 댓글 보강만 실패, 전체 fetch는 죽이지 않음
         _log.warning("댓글 보강 실패 %s — %s", _redact(url), type(exc).__name__)
         label = "fetch_failed"  # round-16: 로딩 실패 = 추출 실패, 빈 상태("none") 아님

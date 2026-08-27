@@ -98,11 +98,15 @@ def test_cache_is_process_wide(tmp_path):
 
 # ── llm_free 프롬프트 회귀 ──
 
-def test_ko_prompt_is_unchanged_poc_string():
+def test_ko_prompt_is_multilingual():
+    # 2026-07-13 수정: 이전 pin("모든 한국어 텍스트를")은 다국어 카드뉴스에서
+    # 영어 프롬프트 박스를 통째로 떨구는 버그를 고정하고 있었다(실측: 동일 이미지·
+    # 동일 모델에서 KO 프롬프트 eng_alpha=0 vs 언어중립 253). OCR 추출 범위는 사용자
+    # 언어와 무관하게 항상 언어 불문 전량이어야 한다 — 그 값으로 pin을 갱신한다.
     from core import llm_free
     assert llm_free._build_prompt("ko") == (
-        "이 이미지에 있는 모든 한국어 텍스트를 빠짐없이·정확히 추출해라. "
-        "카드 내 순서/구조 유지. 설명·해석 없이 텍스트만 출력."
+        "이 이미지에 있는 모든 텍스트를 언어에 상관없이(한국어·영어·숫자·기호 모두) "
+        "빠짐없이·정확히 추출해라. 카드 내 순서/구조 유지. 설명·해석 없이 텍스트만 출력."
     )
 
 

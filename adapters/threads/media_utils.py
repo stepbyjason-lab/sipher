@@ -8,16 +8,23 @@ Threads reuses Instagram's media schema on its GraphQL `post` objects:
 The CDN URLs are SIGNED and time-limited (the `oe=` query param is an expiry),
 so anything you want to keep must be downloaded shortly after scraping.
 """
+import logging
 import os
 import re
-import sys
-import urllib.request
+from pathlib import Path
 from typing import Dict, List, Tuple
+
+from core.media_io import download_to_file
+
+_log = logging.getLogger(__name__)
 
 _UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
+
+# 미디어(이미지/영상) 다운로드 상한 — 자원 고갈 차단(naver_blog와 동일 값).
+_MAX_MEDIA_BYTES = 300 << 20
 
 
 # Threads embeds a "related posts" recommendation feed in the same page/GraphQL
@@ -102,10 +109,17 @@ def _ext_from_url(url: str, default: str) -> str:
     return "." + match.group(1).lower() if match else default
 
 
-def _download_one(url: str, dest: str) -> None:
-    req = urllib.request.Request(url, headers={"User-Agent": _UA, "Referer": "https://www.threads.com/"})
-    with urllib.request.urlopen(req, timeout=60) as resp, open(dest, "wb") as f:
-        f.write(resp.read())
+def _download_one(url: str, dest: str) -> bool:
+    """round-33: core.media_io.download_to_file(스트리밍+상한+원자적 rename)로 위임.
+
+    재fetch 실패(네트워크 중단 등) 시 이미 받아둔 캐시 파일을 절대 훼손하지 않는다
+    — 0바이트로 자르는 직접 open(dest,"wb")를 더 이상 쓰지 않음.
+    """
+    return download_to_file(
+        url, Path(dest),
+        headers={"User-Agent": _UA, "Referer": "https://www.threads.com/"},
+        max_bytes=_MAX_MEDIA_BYTES,
+    )
 
 
 def download_media(posts: List[Dict], out_dir: str = "downloads") -> int:
@@ -131,20 +145,18 @@ def download_media(posts: List[Dict], out_dir: str = "downloads") -> int:
         local_paths: List[str] = []
         for i, url in enumerate(images, 1):
             dest = os.path.join(folder, f"img_{i:02d}{_ext_from_url(url, '.jpg')}")
-            try:
-                _download_one(url, dest)
+            if _download_one(url, dest):
                 local_paths.append(dest)
                 total += 1
-            except Exception as exc:
-                sys.stderr.write(f"  [dl-fail img] {key} #{i}: {exc}\n")
+            else:
+                _log.warning("threads: 이미지 다운로드 실패 %s #%d", key, i)
         for i, url in enumerate(videos, 1):
             dest = os.path.join(folder, f"vid_{i:02d}{_ext_from_url(url, '.mp4')}")
-            try:
-                _download_one(url, dest)
+            if _download_one(url, dest):
                 local_paths.append(dest)
                 total += 1
-            except Exception as exc:
-                sys.stderr.write(f"  [dl-fail vid] {key} #{i}: {exc}\n")
+            else:
+                _log.warning("threads: 영상 다운로드 실패 %s #%d", key, i)
 
         post["downloaded"] = local_paths
     return total

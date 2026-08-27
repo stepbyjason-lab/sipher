@@ -85,6 +85,13 @@ def normalize(post: dict, *, source: str) -> dict:
     round-14: post에 "comments_raw"/"comments_label" 키가 있으면(=fetch(comments=True)
     옵트인 경로) Threads 동형 comments[]로 채운다. 없으면(기본 comments=False) 기존
     하위호환 동작 그대로 — comments=[] + meta.comments_label="not_collected".
+
+    round-B(.handoff/rounds/round-B-first-comment-mode-contract.md): "comments_raw"
+    키 존재 여부(`has_comment_attempt`)가 그대로 `comment_collection_mode`
+    ("not_requested" | "first_only") 판정에도 쓰인다 — comments=True로 시도됐다면
+    성공/실패와 무관하게 "first_only"(정책상 첫 댓글만 시도했다는 사실 자체를 표시,
+    실제 성공/실패는 기존 `comments_label`이 표현). `comment_collection_mode`는
+    `comments_label`을 대체하지 않는 별도 축이다.
     """
     local_images = post.get("local_images") or []
     local_videos = post.get("local_videos") or []
@@ -103,6 +110,7 @@ def normalize(post: dict, *, source: str) -> dict:
     ] if has_comment_attempt else []
     comments_label = post.get("comments_label", _DEFAULT_COMMENTS_LABEL) if has_comment_attempt \
         else _DEFAULT_COMMENTS_LABEL
+    comment_collection_mode = "first_only" if has_comment_attempt else "not_requested"
     return {
         "source": source,
         "platform": "facebook",
@@ -123,6 +131,7 @@ def normalize(post: dict, *, source: str) -> dict:
             "comment_count": post.get("comments"),
             "comment_count_captured": len(comments) if has_comment_attempt else None,
             "comments_label": comments_label,
+            "comment_collection_mode": comment_collection_mode,
             "fetched_at": datetime.now(timezone.utc).isoformat(),
         },
     }
@@ -140,11 +149,17 @@ def _maybe_fetch_comments(ctx, permalink: str, *, comments: bool,
 
     한 포스트의 댓글 보강 실패가 전체 fetch를 죽이지 않는다(계약 §Reliability) —
     실패 시 label="fetch_failed"으로 degrade(round-16: '댓글0'과 구분), 예외를 삼키지 않고 로그만 남긴다.
+
+    round-B: comments=True의 의미를 "가능한 댓글 수집"에서 "첫 top-level 댓글 1개만
+    수집"으로 축소한다 — `limit=1, max_expand=0`으로 호출해 "답글 N개" 확장 클릭
+    루프를 첫 댓글 모드에서 생략한다(첫 화면에 표시되는 첫 댓글은 사실상 항상 초기
+    DOM 렌더에 포함돼 있어 확장이 불필요, 계약 §Facebook 필수변경).
     """
     if not comments:
         return None
     try:
-        return scrape.enrich_post_comments(ctx, permalink, caption_snippet=caption_snippet)
+        return scrape.enrich_post_comments(
+            ctx, permalink, caption_snippet=caption_snippet, limit=1, max_expand=0)
     except Exception as e:  # 댓글 보강 자체가 예기치 않게 죽어도 포스트 전체는 살린다
         _log.warning("댓글 보강 실패(포스트는 계속 진행) %s — %s",
                      scrape._redact(permalink), type(e).__name__)
@@ -162,7 +177,14 @@ def fetch(url: str, *, media_dir: str | Path | None = None,
     프로필/페이지 URL이면 ValueError(전체 수집은 scrape_profile_normalized 사용).
     media_dir 지정 시 미디어 다운로드 + media_paths 채움.
     deep=True면 앨범 set 전체 확장(과수집 위험, 옵트인) — 기본은 포스트(article) 한정.
-    comments=True면 댓글 본문 보강(round-14, 옵트인 — 기본 off, DOM 왕복 추가비용).
+    comments=False(기본): 댓글 보강을 시도하지 않는다(meta.comment_collection_mode=
+    "not_requested").
+    comments=True(round-B: "첫 top-level 댓글 1개만"): 첫 화면에 표시되는 첫 top-level
+    댓글 1개만 보강한다(옵트인 — 기본 off, DOM 왕복 추가비용). "답글 N개" 확장 클릭
+    루프는 생략한다(첫 댓글은 사실상 항상 초기 DOM 렌더에 포함돼 확장이 불필요).
+    meta.comment_collection_mode="first_only"는 성공/실패와 무관하게 "정책상 첫
+    댓글만 시도했다"는 사실을 표시 — 실제 성공/실패/권한 문제는 기존
+    meta.comments_label(collected/partial/none/fetch_failed)이 표현한다.
     """
     from playwright.sync_api import sync_playwright  # 지연 import(테스트성)
 
@@ -203,7 +225,9 @@ def scrape_profile_normalized(target: str, *, media_dir: str | Path | None = Non
 
     1) scrape.scrape_profile로 타임라인 순회(permalink·썸네일·영상 URL 수집).
     2) enrich=True면 각 permalink를 재방문해 풀사이즈 이미지(T3)+영상(T4) 보강.
-    3) comments=True면 각 permalink를 추가로 재방문해 댓글 보강(round-14, 옵트인).
+    3) comments=True면 각 permalink를 추가로 재방문해 첫 top-level 댓글 1개만 보강한다
+       (round-14 옵트인 → round-B: "가능한 댓글 수집"에서 "첫 댓글 1개만"으로 축소,
+       `fetch()` docstring 참조).
     4) per-post normalize(한 건 실패가 전체를 버리지 않음).
     """
     from playwright.sync_api import sync_playwright  # 지연 import

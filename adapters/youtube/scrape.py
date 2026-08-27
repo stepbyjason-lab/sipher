@@ -16,6 +16,7 @@ from __future__ import annotations
 import glob as _glob
 import json
 import logging
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -39,10 +40,16 @@ class YtdlpError(RuntimeError):
 def _run(args: list[str], *, timeout: int | None) -> subprocess.CompletedProcess[str]:
     """yt-dlp를 실행하고 CompletedProcess 반환. 실패 시 YtdlpError."""
     cmd = _YTDLP + args
+    # 자식(yt-dlp, python)이 stdout을 utf-8로 쓰게 강제한다 — 미강제 시 한국 Windows(cp949)
+    # 로케일로 써서 부모의 utf-8 디코딩과 어긋나 probe JSON의 한글 제목·설명이 손상된다
+    # (R32 sweep, TikTok `_run`과 동형). 경로 수집은 media_dir glob이라 미디어 손실엔 면역.
+    # PYTHONIOENCODING만 — PYTHONUTF8은 yt-dlp.conf 등 cp949 설정 로딩을 깨뜨릴 수 있어
+    # 배제(외부 리뷰 P2). stdout 인코딩 수정엔 IOENCODING으로 충분(R32 repro).
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     try:
         cp = subprocess.run(
             cmd, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=timeout,
+            encoding="utf-8", errors="replace", timeout=timeout, env=env,
         )
     except FileNotFoundError as e:  # 인터프리터 자체 실행 불가(비정상 환경)
         raise YtdlpError(f"파이썬 실행 파일을 찾을 수 없음: {e}") from e

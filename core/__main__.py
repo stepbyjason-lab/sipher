@@ -1,4 +1,4 @@
-r"""
+﻿r"""
 sipher 코어 라우터 CLI — 단일 진입점.
 
   python -m core fetch <URL|로컬파일> [플랫폼별 옵션...]
@@ -18,16 +18,17 @@ fetch : 어떤 지원 플랫폼 URL이든, 또는 존재하는 로컬 파일 경
 
 공통 옵션:
   --media-dir DIR   미디어 다운로드 대상 디렉토리
-  --download        이미지/영상 다운로드(threads/facebook 등 지원 어댑터)
+  --download        smart off 또는 명시 opt-in에서 이미지/영상 다운로드 강제
   --deep            (threads) fast pass 생략, 재귀 크롤부터
   --auto            (threads) fast pass 불완전 시 자동 deep 승격
   --max-pages N     (threads) deep 크롤 최대 페이지 수
   --from-start      (youtube) 라이브를 처음부터
-  --ocr             media_paths[] 이미지를 무료 비전 OCR(Gemini)로 인리치
-                    (opt-in, 기본 off — 외부 API 호출 비용/프라이버시 때문)
-  --transcribe      media_paths[] 오디오/영상을 로컬 whisper로 전사해 transcript 채움
-                    (opt-in, 기본 off — subprocess 실행 비용/전사 소요 시간 때문.
-                    로컬 영상/음성 파일 입력은 예외로 자동 적용된다)
+  --smart/--no-smart smart 전량추출(기본 ON). URL만 넣으면 플랫폼별 미디어 다운로드,
+                    OCR, 전사, 첫댓글(지원 플랫폼)을 자동 시도한다.
+  --ocr/--no-ocr    OCR 강제 on/off. 미지정 시 smart에 위임, --no-ocr로 비용 opt-out.
+  --transcribe/--no-transcribe
+                    전사 강제 on/off. 미지정 시 smart에 위임, 로컬 AV는 기본 자동이나
+                    --no-transcribe가 명시되면 실행하지 않는다.
   --whisper-model M (--transcribe와 함께) whisper 모델명(미지정 시 도구 기본값 large-v3)
   --whisper-device D (--transcribe와 함께) whisper 디바이스(미지정 시 도구 기본값 cuda)
   --whisper-compute C (--transcribe와 함께) whisper compute type(미지정 시 도구 기본값
@@ -84,7 +85,8 @@ def main(argv: list[str] | None = None) -> int:
     pf.add_argument("--media-dir", default=None, dest="media_dir",
                      help="directory for downloaded media (다운로드 미디어 저장 디렉토리)")
     pf.add_argument("--download", action="store_true",
-                     help="(threads/tiktok) download media files (미디어 파일 다운로드)")
+                     help="force media download when smart is off or adapter-specific opt-in is needed "
+                          "(미디어 다운로드 강제)")
     pf.add_argument("--deep", action="store_true",
                      help="(threads) force deep crawl (deep 크롤 강제)")
     pf.add_argument("--auto", action="store_true",
@@ -102,12 +104,15 @@ def main(argv: list[str] | None = None) -> int:
     pf.add_argument("--sub-langs", default=None, dest="sub_langs",
                      help="(youtube) subtitle language priority CSV, default ko,en "
                           "(자막 언어 우선순위 CSV)")
-    pf.add_argument("--ocr", action="store_true",
-                     help="enrich media_paths[] images via Gemini OCR "
-                          "(media_paths[] 이미지를 Gemini OCR로 인리치)")
-    pf.add_argument("--transcribe", action="store_true",
-                     help="transcribe media_paths[] audio/video with local whisper "
-                          "(오디오/영상을 로컬 whisper로 전사)")
+    pf.add_argument("--smart", action=argparse.BooleanOptionalAction, default=True,
+                     help="smart 전량추출(기본 ON): 주소만 넣으면 미디어 다운로드+OCR+전사+"
+                          "첫댓글까지 자동. --no-smart면 현행 opt-in(개별 플래그 명시)로 전환")
+    pf.add_argument("--ocr", action=argparse.BooleanOptionalAction, default=None,
+                     help="OCR 인리치 강제 on/off(미지정=smart 위임, --no-ocr로 비용 opt-out) "
+                          "(media_paths[] 이미지를 Gemini OCR로)")
+    pf.add_argument("--transcribe", action=argparse.BooleanOptionalAction, default=None,
+                     help="전사 강제 on/off(미지정=smart 위임, --no-transcribe로 opt-out) "
+                          "(오디오/영상을 로컬 whisper로)")
     pf.add_argument("--whisper-model", default=None, dest="whisper_model",
                      help="(--transcribe) whisper model, tool default large-v3 "
                           "(whisper 모델명, 미지정 시 도구 기본값)")
@@ -203,6 +208,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = fetch(
             args.url,
+            smart=args.smart,
             ocr=args.ocr,
             transcribe=args.transcribe,
             whisper_model=args.whisper_model,
@@ -259,3 +265,4 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

@@ -16,6 +16,7 @@ monkeypatch로 대체한다(`core/tests/test_ocr_ensemble.py`와 동형 monkeypa
 """
 from __future__ import annotations
 
+import copy
 import logging
 import os
 import sys
@@ -28,7 +29,9 @@ if ROOT not in sys.path:
 from pathlib import Path  # noqa: E402
 
 import requests  # noqa: E402
+import pytest  # noqa: E402
 
+import core  # noqa: E402
 from core import normalize as N  # noqa: E402
 from core import transcribe as T  # noqa: E402
 
@@ -336,8 +339,8 @@ def test_request_exception_degrades_item_not_crash(tmp_path, monkeypatch):
     try:
         T.transcribe_media(_media(tmp_path), lang="ko")
         assert False, "TranscribeError expected"
-    except T.TranscribeError:
-        pass  # 상위(예: RequestException 원문)로 전파되지 않고 TranscribeError로 감싸짐
+    except T.TranscribeError as e:
+        assert "네트워크" in str(e)  # 기존 RequestException 분류·정규화 경로 보존
 
 
 def test_server_5xx_degrades_item(tmp_path, monkeypatch):
@@ -442,8 +445,9 @@ def test_local_subprocess_call_passes_timeout(tmp_path, monkeypatch):
         stdout = ""
         stderr = ""
 
-    def fake_run(args, *, cwd, capture_output, text, encoding, errors, timeout, shell):
+    def fake_run(args, *, cwd, capture_output, text, encoding, errors, timeout, shell, env):
         captured["timeout"] = timeout
+        captured["env"] = env
         # 도구가 outdir/<stem>.txt를 생성하는 것을 흉내
         outdir = Path(args[args.index("--outdir") + 1])
         (outdir / f"{Path(args[2]).stem}.txt").write_text("LOCAL-OK", encoding="utf-8")
@@ -453,6 +457,9 @@ def test_local_subprocess_call_passes_timeout(tmp_path, monkeypatch):
     r = T.transcribe_media(_media(tmp_path), lang="ko")
     assert r["backend"] == "local" and r["text"] == "LOCAL-OK"
     assert captured["timeout"] == T._DEFAULT_TIMEOUT_SECONDS
+    # R32: 자식 stdout을 utf-8로 강제(IOENCODING). whisper transcript 파일은 도구가 이미
+    # utf-8 명시 기록이라 PYTHONUTF8은 no-op → 넣지 않는다(외부 리뷰 Codex Q2-#2).
+    assert captured["env"]["PYTHONIOENCODING"] == "utf-8"
 
 
 # ── enrich_transcribe 레벨 통합(사후 Codex 메타 리뷰 P2 보강) ────────────────
@@ -601,6 +608,240 @@ def test_call_groq_opens_file_with_context_manager(tmp_path, monkeypatch):
     # 파일이 with 블록 종료 후 다시 열고 쓸 수 있으면(잠김이 없으면) 핸들 누수 없음.
     p.write_bytes(b"1" * 20)
     assert p.read_bytes() == b"1" * 20
+
+
+# ── round-38B 비정규화 예외 fail-open ───────────────────────────────────────
+
+
+@pytest.mark.parametrize("failure_site", ["media", "extracted"])
+def test_r38b_prepare_upload_stat_oserror_is_normalized(tmp_path, monkeypatch, failure_site):
+    media = _media(tmp_path, name="clip.mp4", size=10)
+    extracted = _media(tmp_path, name="clip_audio.mp3", size=10)
+    http_calls = []
+    sleeps = []
+    real_stat = Path.stat
+
+    def failing_stat(self, *args, **kwargs):
+        if (failure_site == "media" and self == media) or (
+            failure_site == "extracted" and self == extracted
+        ):
+            raise OSError(f"{failure_site} stat failed")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", failing_stat)
+    monkeypatch.setattr(T, "_ffmpeg_path", lambda: "ffmpeg")
+    monkeypatch.setattr(T, "_extract_audio", lambda media_path, *, outdir: extracted)
+    monkeypatch.setattr(T.requests, "post", lambda *a, **k: http_calls.append(1))
+    monkeypatch.setattr(T.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    with pytest.raises(T.TranscribeError) as exc_info:
+        T._prepare_upload_path(media, tmpdir=tmp_path)
+
+    assert isinstance(exc_info.value.__cause__, OSError)
+    assert http_calls == []
+    assert sleeps == []
+
+
+@pytest.mark.parametrize(
+    "read_error",
+    [OSError("transcript disappeared"), UnicodeDecodeError("utf-8", b"x", 0, 1, "bad byte")],
+)
+def test_r38b_local_read_text_failures_are_normalized(tmp_path, monkeypatch, read_error):
+    tool_dir = tmp_path / "tool"
+    (tool_dir / ".venv" / "Scripts").mkdir(parents=True)
+    (tool_dir / ".venv" / "Scripts" / "python.exe").write_bytes(b"")
+    (tool_dir / "transcribe.py").write_text("", encoding="utf-8")
+    _env(tmp_path / ".env.local", WHISPER_TRANSCRIBE_DIR=str(tool_dir))
+    media = _media(tmp_path)
+    http_calls = []
+    sleeps = []
+    real_read_text = Path.read_text
+
+    class _Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(args, **kwargs):
+        outdir = Path(args[args.index("--outdir") + 1])
+        (outdir / f"{Path(args[2]).stem}.txt").write_text("LOCAL-OK", encoding="utf-8")
+        return _Proc()
+
+    def failing_read_text(self, *args, **kwargs):
+        if self.name == f"{media.stem}.txt" and self.parent.name.startswith("sipher_whisper_"):
+            raise read_error
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(T.subprocess, "run", fake_run)
+    monkeypatch.setattr(Path, "read_text", failing_read_text)
+    monkeypatch.setattr(T.requests, "post", lambda *a, **k: http_calls.append(1))
+    monkeypatch.setattr(T.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    with pytest.raises(T.TranscribeError) as exc_info:
+        T.transcribe_media(media, lang="ko")
+
+    assert exc_info.value.__cause__ is read_error
+    assert http_calls == []
+    assert sleeps == []
+
+
+@pytest.mark.parametrize(
+    "open_error",
+    [FileNotFoundError("upload disappeared"), PermissionError("upload denied")],
+)
+def test_r38b_groq_upload_open_failures_are_normalized_without_retry(
+    tmp_path, monkeypatch, open_error,
+):
+    upload = _media(tmp_path)
+    http_calls = []
+    sleeps = []
+    real_open = Path.open
+
+    def failing_open(self, *args, **kwargs):
+        if self == upload:
+            raise open_error
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", failing_open)
+    monkeypatch.setattr(T.requests, "post", lambda *a, **k: http_calls.append(1))
+    monkeypatch.setattr(T.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    with pytest.raises(T.TranscribeError) as exc_info:
+        T._call_groq(upload, api_key="gk", model=T._GROQ_MODEL_TURBO, lang="ko")
+
+    assert exc_info.value.__cause__ is open_error
+    assert "열기 실패" in str(exc_info.value) and "네트워크" not in str(exc_info.value)
+    assert http_calls == []
+    assert sleeps == []
+
+
+@pytest.mark.parametrize("payload", [None, {"text": 7}])
+def test_r38b_groq_response_shape_failures_are_normalized_without_retry(
+    tmp_path, monkeypatch, payload,
+):
+    upload = _media(tmp_path)
+    http_calls = []
+    sleeps = []
+
+    class _ShapeResp:
+        status_code = 200
+        headers = {}
+        text = ""
+
+        def json(self):
+            return payload
+
+    def fake_post(*args, **kwargs):
+        http_calls.append(1)
+        return _ShapeResp()
+
+    monkeypatch.setattr(T.requests, "post", fake_post)
+    monkeypatch.setattr(T.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    with pytest.raises(T.TranscribeError) as exc_info:
+        T._call_groq(upload, api_key="gk", model=T._GROQ_MODEL_TURBO, lang="ko")
+
+    assert isinstance(exc_info.value.__cause__, (TypeError, AttributeError))
+    assert http_calls == [1]
+    assert sleeps == []
+
+
+def test_r38b_non_path_input_typeerror_is_normalized(monkeypatch):
+    bad_path = object()
+    http_calls = []
+    sleeps = []
+    monkeypatch.setattr(T.requests, "post", lambda *a, **k: http_calls.append(1))
+    monkeypatch.setattr(T.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    with pytest.raises(T.TranscribeError) as exc_info:
+        T.transcribe_media(bad_path, lang="ko")
+
+    assert isinstance(exc_info.value.__cause__, TypeError)
+    assert http_calls == []
+    assert sleeps == []
+
+
+def test_r38b_enrich_unknown_exception_skips_item_logs_traceback_and_keeps_len_label(
+    tmp_path, monkeypatch, caplog,
+):
+    good = _media(tmp_path, name="good.mp3")
+    bad = _media(tmp_path, name="bad.mp3")
+    monkeypatch.setattr(N._transcribe, "is_available", lambda: True)
+
+    def transcribe(path, **kwargs):
+        if path == bad:
+            raise RuntimeError("future backend bug")
+        return {"text": "GOOD", "model": "m", "backend": "local"}
+
+    monkeypatch.setattr(N._transcribe, "transcribe_media", transcribe)
+    result = _result_with_media(str(good), str(bad))
+    result["meta"]["video_count"] = 1
+
+    with caplog.at_level(logging.DEBUG, logger=N._log.name):
+        out = N.enrich_transcribe(result)
+
+    assert out["transcript"] == "GOOD"
+    assert out["meta"]["transcript_label"] == "partial"
+    records = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert records and all(record.exc_info is not None for record in records)
+
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_r38b_enrich_transcribe_does_not_swallow_process_interrupts(
+    tmp_path, monkeypatch, interrupt,
+):
+    media = _media(tmp_path)
+    monkeypatch.setattr(N._transcribe, "is_available", lambda: True)
+    monkeypatch.setattr(
+        N._transcribe,
+        "transcribe_media",
+        lambda *a, **k: (_ for _ in ()).throw(interrupt()),
+    )
+
+    with pytest.raises(interrupt):
+        N.enrich_transcribe(_result_with_media(str(media)))
+
+
+@pytest.mark.parametrize("enrichment", ["ocr", "transcribe"])
+def test_r38b_core_fetch_preserves_adapter_result_when_enrichment_raises(
+    monkeypatch, enrichment,
+):
+    adapter_result = {
+        "source": "https://youtube.com/watch?v=abcdefghijk",
+        "platform": "youtube",
+        "body_text": "adapter body",
+        "comments": [{"author": "a", "text": "kept"}],
+        "ocr_text": [{"text": "adapter ocr"}],
+        "transcript": "adapter transcript",
+        "media_paths": ["kept.mp4"],
+        "meta": {"ocr_label": "done", "transcript_label": "fetched", "sentinel": 1},
+    }
+    before = copy.deepcopy(
+        {
+            key: adapter_result[key]
+            for key in ("body_text", "comments", "media_paths", "ocr_text", "transcript")
+        }
+    )
+
+    monkeypatch.setattr(core, "_adapter_fetch", lambda platform: lambda url, **kwargs: adapter_result)
+
+    if enrichment == "ocr":
+        monkeypatch.setattr(N, "enrich_ocr", lambda result: (_ for _ in ()).throw(RuntimeError("ocr")))
+        out = core.fetch(adapter_result["source"], smart=False, ocr=True, transcribe=False)
+        assert out["meta"]["ocr_label"] == "failed"
+        assert out["meta"]["transcript_label"] == "fetched"
+    else:
+        monkeypatch.setattr(
+            N,
+            "enrich_transcribe",
+            lambda result, **kwargs: (_ for _ in ()).throw(RuntimeError("transcribe")),
+        )
+        out = core.fetch(adapter_result["source"], smart=False, ocr=False, transcribe=True)
+        assert out["meta"]["transcript_label"] == "failed"
+        assert out["meta"]["ocr_label"] == "done"
+
+    assert {key: out[key] for key in before} == before
+    assert out["meta"]["sentinel"] == 1
 
 
 if __name__ == "__main__":

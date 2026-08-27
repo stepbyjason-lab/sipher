@@ -63,7 +63,7 @@ credit card.
 | Stage | Models | Cost |
 |---|---|---|
 | Body & comments | Deterministic parsing — no LLM, read straight from the page | Free |
-| Image OCR | **Free ensemble**: `gemini-2.5-flash` + `google/gemma-4-31b-it` + `nvidia/nemotron-nano-12b-v2-vl` (NVIDIA NIM) candidates, cross-checked by a free judge (`gemma-4`). Measured more accurate than any single model on Korean cards | Free tier |
+| Image OCR | **Free ensemble**: current Gemini default `gemini-3.6-flash` + `google/gemma-4-31b-it` + `nvidia/nemotron-nano-12b-v2-vl` (NVIDIA NIM) candidates, cross-checked by a free judge (`gemma-4`). Earlier 2.5-based testing measured the ensemble more accurate than any single model on Korean cards | Free tier |
 | Audio/video transcription | **Local first**: faster-whisper `large-v3` → **free fallback**: Groq `whisper-large-v3-turbo` (then `whisper-large-v3` on quota). Video gets its audio extracted via ffmpeg before upload | Local / free tier |
 | Paid fallback | `claude-sonnet-4-5` — only runs if **you** set `OCR_PAID_FALLBACK=claude` | Opt-in |
 

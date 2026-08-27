@@ -91,6 +91,10 @@ def _run_node_template(template: str, args: dict, timeout: int = 90) -> tuple[in
             cwd=TEMPLATES_DIR,
             capture_output=True,
             text=True,
+            # R32 sweep: encoding 미지정이면 부모가 로케일(cp949)로 디코딩해 node의 utf-8
+            # HTML 출력(한글 포함)이 손상된다. utf-8로 고정한다(node는 기본 utf-8 출력).
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
         return proc.returncode, proc.stdout, proc.stderr

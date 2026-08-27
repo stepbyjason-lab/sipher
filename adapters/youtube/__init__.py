@@ -201,13 +201,27 @@ def fetch(url: str, *, media_dir: str | Path | None = None, from_start: bool = F
             _log.warning("--with-chat은 media_dir이 필요합니다 — 채팅 생략")
 
     chat_count = _count_chat(chat_path)
-    transcript, transcript_label = (
-        _transcript.fetch_transcript(video_id, languages=tuple(sub_langs.split(",")))
-        if with_transcript else (None, "none")
-    )
-    comment_list, comments_label = (
-        _comments.fetch_comments(video_id, limit=max_comments) if with_comments else ([], "none")
-    )
+    transcript, transcript_label = None, "none"
+    if with_transcript:
+        try:
+            transcript, transcript_label = _transcript.fetch_transcript(
+                video_id, languages=tuple(sub_langs.split(",")),
+            )
+        except Exception as e:
+            _log.exception("transcript 처리 실패 video_id=%s — %s",
+                           video_id, type(e).__name__)
+            transcript_label = "fetch_failed"
+
+    comment_list, comments_label = [], "none"
+    if with_comments:
+        try:
+            comment_list, comments_label = _comments.fetch_comments(
+                video_id, limit=max_comments,
+            )
+        except Exception as e:
+            _log.exception("댓글 처리 실패 video_id=%s — %s",
+                           video_id, type(e).__name__)
+            comments_label = "fetch_failed"
 
     return normalize(
         info, source=url, videos=videos, subtitle_paths=subs, chat_path=chat_path,

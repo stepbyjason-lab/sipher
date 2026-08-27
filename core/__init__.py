@@ -1,4 +1,4 @@
-r"""
+﻿r"""
 sipher 코어 라우터 — 단일 진입점.
 
 `fetch(url, **kwargs) -> 정규화 JSON dict`. URL의 host를 코드로 판별해(§5 매트릭스,
@@ -11,9 +11,10 @@ LLM 판단 없음) 해당 어댑터 `adapters.<platform>.fetch`로 위임한다.
   라우팅 정본이다(§5 표). LLM에 URL 판별을 맡기지 않는다.
 - **매칭된 어댑터만 지연 임포트(importlib).** 무관 플랫폼의 무거운 의존성
   (playwright 등)을 끌어오지 않는다.
-- **플랫폼별 옵션은 **kwargs로 그대로 통과.** 라우터는 옵션을 해석하지 않고
-  어댑터로 넘긴다(threads: deep/auto/download/max_pages, youtube: from_start/
-  with_video/with_subs/sub_langs 등). 잘못된 옵션은 어댑터가 TypeError로 거른다.
+- **공통 smart override는 라우터가 번역.** `download`/`comments`/`transcribe`는
+  플랫폼별 인자명(예: youtube `with_video`/`with_comments`/`with_transcript`)으로
+  바꾼 뒤 어댑터로 넘긴다. 그 밖의 플랫폼별 옵션은 **kwargs로 통과하며,
+  잘못된 옵션은 어댑터가 TypeError로 거른다.
 - **로컬 파일 직접 입력(round-08 §C, round-08 리뷰 Post-Review Fix로 순서 정정)**:
   로컬 파일 존재 확인이 URL 매칭보다 **먼저**다. `PLATFORM_HOSTS`의 모든 패턴은
   스킴이 옵션(`^(?:https?://)?...`)이라 `youtube.com/watch` 같은 스킴 없는
@@ -35,11 +36,14 @@ LLM 판단 없음) 해당 어댑터 `adapters.<platform>.fetch`로 위임한다.
 from __future__ import annotations
 
 import importlib
+import logging
 import re
 from pathlib import Path
 from typing import Callable
 
 __all__ = ["fetch", "detect_platform", "PLATFORM_HOSTS", "SUPPORTED_PLATFORMS"]
+
+_log = logging.getLogger(__name__)
 
 # §5 라우팅 SSOT: (platform, host 정규식). 위에서부터 첫 매칭이 이긴다.
 # host만 본다 — 경로/식별자 검증은 각 어댑터 parse_url이 (SSRF·인젝션 방어까지) 담당.
@@ -53,6 +57,27 @@ PLATFORM_HOSTS: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 SUPPORTED_PLATFORMS: tuple[str, ...] = tuple(p for p, _ in PLATFORM_HOSTS)
+
+# round-29 S1(smart-content-detection): 플랫폼별 "전량 추출" capability 맵.
+# smart=True(기본)일 때 core.fetch가 어댑터에 주입할 kwargs — 어댑터마다 미디어
+# 다운로드·댓글 트리거 kwarg가 제각각(S3 감사 2026-07-13)이라 이 맵이 SSOT다.
+# 규약: 사용자가 명시한 kwarg가 항상 이긴다(주입은 미지정 항목만 채운다 — override 금지).
+#   media   : 미디어(이미지/영상) 다운로드를 켜는 kwargs.
+#   comments: 첫 댓글 수집을 켜는 kwargs(None=이 플랫폼은 core 레벨 토글 없음).
+#   media_dir: True면 smart가 기본 다운로드 경로를 채워야 다운로드가 일어난다(naver 등).
+_SMART_CAPS: dict[str, dict] = {
+    "tiktok":     {"media": {"download": True},  "comments": None},   # 댓글=R31(정직 미지원 라벨)
+    "threads":    {"media": {"download": True},  "comments": None},   # 저자연속글=deep/auto 기본
+    "instagram":  {"media": {"download": True},  "comments": {"comments": True}},
+    "facebook":   {"media": {"with_video": True}, "comments": {"comments": True}},  # 이미지 자동
+    "youtube":    {"media": {"with_video": True, "with_subs": True, "with_transcript": True},
+                   "comments": {"with_comments": True}},
+    "naver_blog": {"media": {}, "comments": None, "media_dir": True},  # media_dir 존재로 다운로드
+    "web":        {"media": {}, "comments": None},                    # 미디어 다운로드 비목표
+}
+
+# smart 다운로드 기본 경로(사용자 media_dir 미지정 시). 기존 tiktok 기본("downloads")과 일치.
+_SMART_DEFAULT_MEDIA_DIR = "downloads"
 
 
 def detect_platform(url: str) -> str:
@@ -122,8 +147,11 @@ def _looks_like_http_url(url: str) -> bool:
 def fetch(
     url: str,
     *,
-    ocr: bool = False,
-    transcribe: bool = False,
+    smart: bool = True,
+    ocr: bool | None = None,
+    transcribe: bool | None = None,
+    download: bool | None = None,
+    comments: bool | None = None,
     whisper_model: str | None = None,
     whisper_device: str | None = None,
     whisper_compute: str | None = None,
@@ -139,6 +167,13 @@ def fetch(
     { source, platform, body_text, comments[], ocr_text[], transcript,
     media_paths[], meta }.
 
+    smart=True(기본, round-29 S1): 주소만 넣으면 전량 자동추출한다 — 플랫폼별 미디어
+    다운로드·첫댓글 kwargs를 capability 맵(_SMART_CAPS, S3 감사)에서 주입하고,
+    ocr/transcribe 미지정(None)을 True로 해석한다. **사용자가 명시한 kwarg·플래그가
+    항상 이긴다**(주입은 미지정 항목만 채운다 — override 금지). smart=False면 현행
+    opt-in 시맨틱(ocr/transcribe 기본 False, 미디어는 어댑터 kwarg 명시 필요) 그대로다.
+    ocr/transcribe는 이제 bool|None — None=smart 위임, True/False=명시 override.
+
     플랫폼별 kwargs 예:
       threads : deep=, auto=, download=, max_pages=, media_dir=
       youtube : from_start=, with_video=, with_subs=, sub_langs=, media_dir=
@@ -148,23 +183,11 @@ def fetch(
     옵션을 검열하지 않는다 — 어댑터 계약을 SSOT로 존중). 로컬 흐름에서는
     kwargs가 의미가 없으므로 core.local.fetch_local이 조용히 무시한다.
 
-    ocr=True(opt-in, 기본 False): fetch 결과의 media_paths[] 중 이미지 파일을
-    무료 비전 OCR(Gemini, core.llm_free)로 인리치해 ocr_text[]를 채운다
-    (core.normalize.enrich_ocr). 기본값 False — OCR은 외부 API 호출(네트워크·
-    rate-limit·프라이버시 비용)이라 명시 요청 시에만 실행한다(docs/01 §8·§10).
-    로컬 이미지 입력도 동일 — 자동 적용하지 않는다(옵트인 유지).
-
-    transcribe=True(opt-in, 기본 False): fetch 결과의 media_paths[] 중 오디오/
-    영상 파일을 로컬 whisper(core.transcribe, subprocess 호출)로 인리치해
-    transcript를 채운다(core.normalize.enrich_transcribe). 이미 transcript가
-    채워져 있으면(예: youtube with_transcript=True) whisper를 호출하지 않고
-    그대로 통과시킨다. 기본값 False — subprocess 실행 비용/전사 소요 시간 때문에
-    명시 요청 시에만 실행한다(docs/01 §6·§10).
-    **로컬 영상/음성 입력일 때만 예외** — 로컬 whisper는 외부 비용이 없으므로
-    사용자가 transcribe=True를 명시하지 않아도 자동으로 켠다(round-08 §D,
-    `transcribe = transcribe or is_local`). enrich_transcribe 자체는 media_paths
-    중 AV 확장자가 없으면 즉시 조기 반환하므로, 로컬 텍스트/이미지 입력에
-    whisper subprocess가 실행되는 일은 없다.
+    ocr=None/transcribe=None은 smart에 위임한다. smart=True(기본)에서는 이미지 OCR과
+    전사를 자동 시도하고, smart=False에서는 `ocr=True`/`transcribe=True` 명시 때만
+    실행한다. `ocr=False`/`transcribe=False`는 항상 이긴다. 로컬 영상/음성은 무비용
+    전사 기본 자동을 유지하지만, 명시 `transcribe=False`면 실행하지 않는다. 이미
+    transcript나 어댑터 실패 라벨이 있으면 smart 폴백이 덮어쓰지 않는다.
 
     ocr과 transcribe를 동시에 True로 주면 순차 적용한다(서로 다른 필드를
     건드리므로 순서 무관).
@@ -179,7 +202,9 @@ def fetch(
         from . import local
 
         result = local.fetch_local(str(local_path), **kwargs)
-        transcribe = True
+        # 로컬 AV는 무비용 전사를 기본 적용하되, 명시 transcribe=False는 존중한다.
+        if transcribe is None:
+            transcribe = True
     else:
         try:
             platform = detect_platform(url)
@@ -191,14 +216,129 @@ def fetch(
                 platform = "web"
             else:
                 raise
+        kwargs = _apply_smart_kwargs(
+            platform, kwargs, smart=smart, download=download, comments=comments, transcribe=transcribe
+        )
         result = _adapter_fetch(platform)(url, **kwargs)
+        result = _apply_common_labels(platform, result, smart=smart, comments=comments)
+    # 인리치먼트 미지정(None)은 smart 위임: smart=True→전량추출(True), False→현행 opt-in(False).
+    # 로컬은 위에서 transcribe=None일 때만 True로 확정됐으므로 명시 False는 보존된다.
+    if ocr is None:
+        ocr = smart
+    if transcribe is None:
+        transcribe = smart
     if ocr or transcribe:
         from . import normalize
 
         if ocr:
-            result = normalize.enrich_ocr(result)
+            try:
+                result = normalize.enrich_ocr(result)
+            except Exception:
+                _log.exception("OCR enrichment 실패 — 어댑터 산출물 보존")
+                meta = dict(result.get("meta") or {})
+                meta["ocr_label"] = "failed"
+                result = {**result, "meta": meta}
         if transcribe:
-            result = normalize.enrich_transcribe(
-                result, model=whisper_model, device=whisper_device, compute=whisper_compute
-            )
+            try:
+                result = normalize.enrich_transcribe(
+                    result, model=whisper_model, device=whisper_device, compute=whisper_compute
+                )
+            except Exception:
+                _log.exception("transcript enrichment 실패 — 어댑터 산출물 보존")
+                meta = dict(result.get("meta") or {})
+                meta["transcript_label"] = "failed"
+                result = {**result, "meta": meta}
+    return result
+
+
+def _apply_smart_kwargs(
+    platform: str,
+    kwargs: dict,
+    *,
+    smart: bool = True,
+    download: bool | None = None,
+    comments: bool | None = None,
+    transcribe: bool | None = None,
+) -> dict:
+    """Resolve smart defaults and common overrides into adapter-specific kwargs.
+
+    Common controls (download/comments/transcribe) are router-level intent. They
+    are never passed through directly to adapters that do not accept those names;
+    instead they are translated to each platform's public fetch signature.
+    """
+    caps = _SMART_CAPS.get(platform)
+    if not caps:
+        return dict(kwargs)
+
+    resolved = dict(kwargs)
+
+    def put(values: dict | None, *, override: bool = False) -> None:
+        for key, value in (values or {}).items():
+            if override or key not in resolved:
+                resolved[key] = value
+
+    media_defaults = caps.get("media") or {}
+    comment_defaults = caps.get("comments") or {}
+
+    if smart:
+        put(media_defaults)
+        put(comment_defaults)
+        if platform == "youtube" and comment_defaults:
+            resolved.setdefault("max_comments", 1)
+
+    if download is not None:
+        if platform in {"tiktok", "threads", "instagram"}:
+            put({"download": download}, override=True)
+        elif platform == "facebook":
+            put({"with_video": download}, override=True)
+        elif platform == "youtube":
+            put({"with_video": download, "with_subs": download}, override=True)
+        elif platform == "naver_blog":
+            if not download:
+                resolved.pop("media_dir", None)
+            # download=True for naver is represented by media_dir below.
+
+    if comments is not None:
+        if platform in {"instagram", "facebook"}:
+            put({"comments": comments}, override=True)
+        elif platform == "youtube":
+            put({"with_comments": comments}, override=True)
+            if comments:
+                resolved.setdefault("max_comments", 1)
+
+    if transcribe is not None and platform == "youtube":
+        put({"with_transcript": transcribe}, override=True)
+
+    wants_media_dir = False
+    if platform == "naver_blog":
+        wants_media_dir = (smart and download is not False) or download is True
+    elif caps.get("media"):
+        media_keys = set(media_defaults)
+        wants_media_dir = any(resolved.get(key) for key in media_keys)
+
+    if wants_media_dir:
+        resolved.setdefault("media_dir", _SMART_DEFAULT_MEDIA_DIR)
+    elif download is False:
+        # A common download opt-out should not leave smart's default download
+        # directory behind as an accidental download trigger.
+        resolved.pop("media_dir", None)
+
+    return resolved
+
+
+def _apply_common_labels(
+    platform: str, result: dict, *, smart: bool, comments: bool | None
+) -> dict:
+    """Add router-level honesty labels for common capabilities adapters lack."""
+    meta = dict(result.get("meta") or {})
+    comments_requested = comments is True or (comments is None and smart)
+    if (
+        comments_requested
+        and platform in {"naver_blog", "web"}
+        and "comments_label" not in meta
+        and not result.get("comments")
+    ):
+        meta["comments_label"] = "unsupported"
+    if meta is not result.get("meta"):
+        return {**result, "meta": meta}
     return result

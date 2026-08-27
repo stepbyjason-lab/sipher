@@ -27,6 +27,9 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from core.media_io import atomic_write as _atomic_write
+from core.media_io import download_to_file as _download_to_file
+
 from . import images
 
 _log = logging.getLogger(__name__)
@@ -332,67 +335,18 @@ def _summarize_label(labels: list[str]) -> str:
     return max(labels, key=lambda x: _LABEL_RANK.get(x, 0))
 
 
-def _atomic_write(out: Path, data: bytes) -> bool:
-    """tmp에 쓰고 rename — 중단 시 부분 파일이 최종 경로에 안 남게."""
-    tmp = out.with_suffix(out.suffix + ".tmp")
-    try:
-        tmp.write_bytes(data)
-        tmp.replace(out)
-        return True
-    except Exception as exc:
-        # 디스크 풀/권한 등 시스템 이슈 — 네트워크 실패와 구분되게 warning(로컬 경로는 비밀 아님)
-        _log.warning("파일 쓰기 실패 %s — %s: %s", out.name, type(exc).__name__, exc)
-        try:
-            tmp.unlink(missing_ok=True)
-        except Exception as ue:
-            _log.debug("tmp 정리 실패 %s — %s", tmp.name, type(ue).__name__)
-        return False
-
-
-class _MediaTooLarge(Exception):
-    """미디어가 _MAX_MEDIA 초과 — _download_raw 내부 신호(상한 시점에 이미 warning)."""
-
-
 def _download_raw(url: str, out: Path, timeout: int = 60) -> bool:
-    """스트리밍 다운로드(크기 상한) + 원자적 쓰기. 호스트 화이트리스트는 호출 전 보장."""
-    if not _ALLOWED_VIDEO_HOST.match(url):  # 2중 방어(SSRF)
-        _log.debug("다운로드 호스트 비허용 — skip: %s", _redact(url))
-        return False
-    req = urllib.request.Request(url, headers={"User-Agent": _UA_PC,
-                                               "Referer": "https://blog.naver.com/"})
-    tmp = out.with_suffix(out.suffix + ".tmp")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            if r.status != 200:
-                _log.debug("미디어 HTTP %s — skip %s", r.status, _redact(url))
-                return False
-            total = 0
-            with tmp.open("wb") as fh:
-                while True:
-                    chunk = r.read(_CHUNK)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if total > _MAX_MEDIA:
-                        _log.warning("미디어 상한(%dB) 초과 — 중단 %s", _MAX_MEDIA, _redact(url))
-                        raise _MediaTooLarge
-                    fh.write(chunk)
-        tmp.replace(out)
-        return True
-    except _MediaTooLarge:
-        pass  # 이미 warning
-    except urllib.error.HTTPError as exc:  # 4xx/5xx 영상 — 흔함, debug(노이즈 회피)
-        _log.debug("미디어 HTTP %s — %s", exc.code, _redact(url))
-    except OSError as exc:  # 네트워크(URLError)·디스크 풀/권한 — 운영 이슈는 가시화
-        _log.warning("미디어 다운로드 오류 %s — %s", _redact(url), type(exc).__name__)
-    except Exception as exc:  # 예상 못 한 오류(코드 버그) — 가시화
-        _log.warning("미디어 다운로드 예외 %s — %s", _redact(url), type(exc).__name__)
-        _log.debug("미디어 다운로드 예외 상세", exc_info=True)
-    try:  # 실패 공통: 부분 tmp 정리
-        tmp.unlink(missing_ok=True)
-    except Exception as ue:
-        _log.debug("tmp 정리 실패 %s — %s", tmp.name, type(ue).__name__)
-    return False
+    """스트리밍 다운로드(크기 상한) + 원자적 쓰기 — core.media_io.download_to_file 위임.
+
+    호스트 화이트리스트(SSRF 차단)·상한(_MAX_MEDIA)·UA/Referer는 naver 고유 계약 그대로.
+    """
+    return _download_to_file(
+        url, out,
+        headers={"User-Agent": _UA_PC, "Referer": "https://blog.naver.com/"},
+        timeout=timeout,
+        max_bytes=_MAX_MEDIA,
+        host_pattern=_ALLOWED_VIDEO_HOST,
+    )
 
 
 def scrape_blog(blog_id: str, *, max_posts: int = 10000,

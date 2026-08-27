@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -42,6 +43,20 @@ _HOST = re.compile(r"^(?:https?://)?(?:www\.|vt\.|vm\.)?tiktok\.com/", re.I)
 _GALLERY_DL: list[str] = [sys.executable, "-m", "gallery_dl"]
 _DUMP_TIMEOUT = 60
 _DOWNLOAD_TIMEOUT = 180
+
+
+# 본문이 "링크·정보는 댓글에서 확인하라"고 가리키는 전형적 신호. TikTok 댓글은
+# 수집 미지원(R31 실측: gallery-dl·yt-dlp 미구현, comment API는 Akamai 봇차단 벽)이라,
+# 이 신호가 잡히면 조용히 버리지 않고 원문에서 직접 확인하도록 정직히 안내한다.
+_COMMENT_REF_RE = re.compile(r"댓글|덧글|코멘트|\bcomments?\b", re.I)
+
+
+def _comment_reference_notice(desc: str, source: str) -> str | None:
+    """본문이 댓글 참고를 지시하면 원문 링크를 포함한 안내 메시지, 아니면 None."""
+    if desc and _COMMENT_REF_RE.search(desc):
+        return ("본문이 댓글을 참고하라고 안내하지만 TikTok 댓글은 수집이 지원되지 "
+                f"않습니다. 원문에서 댓글을 직접 확인하세요: {source}")
+    return None
 
 
 class GalleryDlError(RuntimeError):
@@ -68,10 +83,17 @@ def parse_url(url: str) -> str:
 
 def _run(args: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
     cmd = _GALLERY_DL + args
+    # gallery-dl(자식 python)이 stdout을 OS 로케일 코드페이지(예: 한국 Windows=cp949)로
+    # 쓰면, 여기서 utf-8로 디코딩할 때 한글·이모지가 섞인 파일 경로가 깨져 `is_file()`이
+    # 실패하고 미디어가 통째로 누락된다(실측 2026-07-13: PYTHONIOENCODING 미설정 환경에서
+    # download_failed). 자식 stdout을 utf-8로 강제해 디코딩과 일치시킨다(환경 독립).
+    # PYTHONIOENCODING만 쓴다(R32 repro: 이것만으로 9/9 복구). PYTHONUTF8은 gallery-dl.conf
+    # 등 cp949 설정 로딩을 깨뜨릴 수 있어(외부 리뷰 P2) 쓰지 않는다 — stdout 수정엔 불필요.
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
     try:
         cp = subprocess.run(
             cmd, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", timeout=timeout, shell=False,
+            encoding="utf-8", errors="replace", timeout=timeout, shell=False, env=env,
         )
     except FileNotFoundError as e:
         raise GalleryDlError(f"파이썬 실행 파일을 찾을 수 없음: {e}") from e
@@ -117,8 +139,20 @@ def _download(canonical_url: str, out_dir: str) -> list[str]:
     if cp.returncode != 0:
         _log.warning("tiktok: 다운로드 실패(rc=%s): %s", cp.returncode, (cp.stderr or "")[-400:])
         return []
-    paths = [line.strip() for line in (cp.stdout or "").splitlines() if line.strip()]
-    return [p for p in paths if Path(p).is_file()]
+    # gallery-dl은 이미 존재해 재다운로드를 skip한 파일을 "# <경로>"로 출력한다(실측
+    # 2026-07-13). 이 마커를 떼지 않으면 재fetch 시 캐시된 미디어가 media_paths에서
+    # 통째로 누락돼(=download_failed 오판) OCR/전사가 안 돈다 — skip도 "파일 있음"이므로
+    # 정상 미디어로 취급한다("주소만 넣으면 전량"이 재fetch에서도 성립하게).
+    paths: list[str] = []
+    for line in (cp.stdout or "").splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        if s.startswith("# "):
+            s = s[2:].strip()
+        if Path(s).is_file():
+            paths.append(s)
+    return paths
 
 
 def fetch(url: str, *, media_dir: str | Path | None = None, download: bool = False) -> dict:
@@ -155,6 +189,17 @@ def normalize(payload: dict, *, source: str, media_paths: list[str], downloaded:
     stats = payload.get("stats") or {}
     author = payload.get("author") or {}
     video = payload.get("video") or {}
+    # round-29 S2(smart-content-detection): content-type 사전신호 — 다운로드 없이
+    # dump-json만으로 얻는다("프로브는 공짜": gallery-dl이 항상 먼저 하는 메타조회에
+    # 이미 들어 있음). smart 자동라우팅(사진→OCR / 영상→전사)과 정직 라벨의 토대.
+    # spike(2026-07-13 실측)로 확정: photo-mode는 post_type=="image" + imagePost.images[].
+    # 정확한 이미지 수는 len(imagePost.images) — dump-json 최상위 kind=3 개수는 커버가
+    # 끼어 +1이라 부정확하다.
+    image_post = payload.get("imagePost") or {}
+    images = image_post.get("images") or []
+    image_count = len(images)
+    is_photo_post = payload.get("post_type") == "image" or image_count > 0
+    has_video = (not is_photo_post) and bool(video.get("playAddr") or video.get("downloadAddr"))
     # gallery-dl은 createTime을 문자열로 반환하는 경우가 관측됨(round-09 실측:
     # "1768668049", int/float 아님) — 정수/실수/숫자문자열 모두 관대하게 허용한다.
     create_time_raw = payload.get("createTime")
@@ -168,6 +213,8 @@ def normalize(payload: dict, *, source: str, media_paths: list[str], downloaded:
     media_label: MediaLabel = "none"
     if downloaded:
         media_label = "downloaded" if media_paths else "download_failed"
+
+    comment_notice = _comment_reference_notice(payload.get("desc") or "", source)
 
     return {
         "source": source,
@@ -186,6 +233,16 @@ def normalize(payload: dict, *, source: str, media_paths: list[str], downloaded:
             "play_count": stats.get("playCount", 0),
             "share_count": stats.get("shareCount", 0),
             "duration_sec": video.get("duration"),
+            # round-29 S2: content-type 사전신호(다운로드 무관, 항상 존재).
+            "is_photo_post": is_photo_post,
+            "image_count": image_count,
+            "has_video": has_video,
+            # round-29 D(첫댓글 정직처리): TikTok 댓글수집은 미지원(gallery-dl dump-json이
+            # 댓글을 안 채우고 yt-dlp는 /photo/를 못 씀 — R31로 분리). smart가 comments를
+            # 기대해도 "조용한 빈 배열"이 아니라 '미지원'임을 정직히 노출한다.
+            "comments_label": "unsupported",
+            # R31: 댓글 수집은 미지원이나, 본문이 댓글 참고를 지시하면 원문 안내(정직 degrade).
+            "comment_notice": comment_notice,
             "media_label": media_label,
             "created_at_utc": created_at,
             "fetched_at": datetime.now(timezone.utc).isoformat(),

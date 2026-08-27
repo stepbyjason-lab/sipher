@@ -52,7 +52,7 @@ Sipher의 AI 보강은 **유료 키 없이 끝까지 돌아가도록** 설계됐
 | 단계 | 모델 | 비용 |
 |---|---|---|
 | 본문·댓글 추출 | 결정적 파싱 — LLM 안 씀, 페이지에서 바로 읽음 | 무료 |
-| 이미지 OCR | **무료 앙상블**: `gemini-2.5-flash` + `google/gemma-4-31b-it` + `nvidia/nemotron-nano-12b-v2-vl`(NVIDIA NIM) 후보를 무료 judge(`gemma-4`)가 교차검증. 한국어 카드 실측에서 단일 모델보다 정확 | 무료 티어 |
+| 이미지 OCR | **무료 앙상블**: 현재 Gemini 기본값 `gemini-3.6-flash` + `google/gemma-4-31b-it` + `nvidia/nemotron-nano-12b-v2-vl`(NVIDIA NIM) 후보를 무료 judge(`gemma-4`)가 교차검증. 기존 2.5 기반 카드 실측에서는 앙상블이 단일 모델보다 정확 | 무료 티어 |
 | 음성/영상 전사 | **로컬 우선**: faster-whisper `large-v3` → **무료 폴백**: Groq `whisper-large-v3-turbo`(한도 시 `whisper-large-v3`). 영상은 ffmpeg로 오디오만 추출해 업로드 | 로컬 / 무료 티어 |
 | 유료 폴백 | `claude-sonnet-4-5` — `OCR_PAID_FALLBACK=claude`로 **직접 켜야만** 동작 | 옵트인 |
 

@@ -24,8 +24,10 @@ Each attempt dict: {"route","platform","ok","status","bytes","note"}.
 """
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import sys
 from typing import Optional
 from urllib.parse import urlsplit
 
@@ -164,9 +166,16 @@ def _x(url: str, timeout: int) -> dict:
 def _youtube(url: str, timeout: int) -> dict:
     attempts: list[dict] = []
     try:
+        # R32 sweep: (1) encoding 미지정이면 부모가 로케일(cp949)로 디코딩해 yt-dlp JSON의
+        # 한글이 손상 → utf-8 고정 + 자식 stdout utf-8 강제(PYTHONIOENCODING; PYTHONUTF8은
+        # cp949 yt-dlp.conf 로딩을 깨뜨릴 수 있어 배제, 외부 리뷰 P2).
+        # (2) 외부 리뷰 P1: bare "yt-dlp"는 venv에서 FileNotFoundError 위험 →
+        #     sys.executable -m yt_dlp로(youtube 어댑터 `_YTDLP`와 동형, PATH 비의존).
         p = subprocess.run(
-            ["yt-dlp", "--dump-json", "--skip-download", url],
+            [sys.executable, "-m", "yt_dlp", "--dump-json", "--skip-download", url],
             capture_output=True, text=True, timeout=max(timeout, 60),
+            encoding="utf-8", errors="replace",
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
         ok = p.returncode == 0 and p.stdout.strip().startswith("{")
         note = "json" if ok else (p.stderr or "").strip()[:80]
