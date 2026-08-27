@@ -2,6 +2,8 @@
 
 # Sipher
 
+> **Current public release: v0.1.0**
+
 **Throw any URL or file at it — get back clean, normalized content.**<br>
 **아무 URL이나 파일을 던지면 — 깨끗하게 정규화된 콘텐츠로 돌려줍니다.**
 
