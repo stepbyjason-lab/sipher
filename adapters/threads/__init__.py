@@ -153,22 +153,17 @@ def _has_author_thread_candidate(posts: list[dict], *, code: str, author: str) -
 
 
 def fetch(url: str, *, media_dir: str | Path | None = None, deep: bool = False,
-          auto: bool = False, download: bool = False, max_pages: int = 100) -> dict:
+          auto: bool = False, all_comments: bool = False, download: bool = False,
+          max_pages: int = 100) -> dict:
     """단일 Threads 포스트 URL → 정규화 JSON dict.
 
-    - deep=False(기본): 빠른 단일 패스(fast_scrape). 완전성 휴리스틱은 vendored
-      scrape.assess()가 stderr 로그로만 알려줌 — 어댑터 레벨에서 재계산해 meta에 싣는다.
-    - deep=True: 처음부터 재귀 크롤(threads_scraper_v2, 최대 max_pages 페이지).
+    - 기본(deep=False, auto=False): 빠른 단일 패스(fast_scrape) + 저자 전용(author-only).
+      원글과 원글 작성자의 연속 포스트만 수집하고 타인 댓글은 제외한다. 자동 deep 승격 없음.
     - auto=True: fast pass가 불완전해 보이면 자동으로 deep 크롤 승격(vendored dispatcher 위임).
+    - deep=True: 처음부터 재귀 크롤(threads_scraper_v2, 최대 max_pages 페이지, 전체 댓글 수집).
+    - all_comments=True: fast pass에서도 타인 댓글을 제외하지 않고 수집한다.
     - download=True: media_dir(기본 "downloads")에 이미지/영상 다운로드. CDN URL은
       서명·시간제한이라 스크랩 직후 받지 않으면 만료된다(원본 media_utils.py docstring 근거).
-
-    [Round A Amendment, 2026-07-04 사용자 승인] Threads는 저자가 자기 글에 이어
-    연속 포스트를 쓰는 문화가 있어(최대 관측 ~14개 체인), 이를 놓치지 않기 위해
-    `auto`/`deep` 인자와 무관하게 다음 조건이면 자동으로 deep 크롤까지 승격한다:
-    fast 결과에 author_thread 후보(§3 기준)가 1개 이상 있고, 동시에 기존
-    `assess().incomplete`가 True인 경우. 이 트리거는 Threads 어댑터에만 적용되는
-    예외이며, 사용자가 `auto=True`/`deep=True`를 명시하면 기존 동작이 우선한다.
 
     보안 경고(trusted input): media_dir/max_pages는 로컬 사용자가 지정하는 신뢰 입력이다.
     이 함수는 경로 containment를 하지 않는다 — youtube 어댑터와 동일한 경계 원칙.
@@ -183,9 +178,23 @@ def fetch(url: str, *, media_dir: str | Path | None = None, deep: bool = False,
     # query/fragment는 이 재구성으로 자연히 제거된다.
     canonical = f"https://www.threads.net/@{author}/post/{code}"
 
-    posts, actual_deep = _run_scrape(canonical, deep=deep, auto=auto, max_pages=max_pages,
-                                      author=author, code=code)
+    posts, actual_deep = _run_scrape(
+        canonical, deep=deep, auto=auto, max_pages=max_pages, author=author, code=code,
+    )
     assessment = _dispatcher.assess(posts, canonical)
+    if not deep and not actual_deep and not all_comments:
+        root = next((p for p in posts if p.get("code") == code), None)
+        root_author = (root or {}).get("author") or author
+        raw_post_count = len(posts)
+        posts = [
+            p for p in posts
+            if p.get("code") == code or (root_author and p.get("author") == root_author)
+        ]
+        assessment = {
+            **assessment,
+            "author_only": True,
+            "comments_filtered": raw_post_count - len(posts),
+        }
 
     if not assessment.get("root_found"):
         raise RuntimeError(
@@ -205,7 +214,7 @@ def fetch(url: str, *, media_dir: str | Path | None = None, deep: bool = False,
 
 
 def _run_scrape(url: str, *, deep: bool, auto: bool, max_pages: int,
-                 author: str, code: str) -> tuple[list[dict], bool]:
+                author: str = "", code: str = "") -> tuple[list[dict], bool]:
     """asyncio 이벤트 루프 기동 + vendored 티어 디스패처 호출을 감싸는 동기 경계.
 
     vendored fast_scrape.scrape()/scrape_threads_recursive()/assess()를 그대로
@@ -237,15 +246,11 @@ def _run_scrape(url: str, *, deep: bool, auto: bool, max_pages: int,
 
     async def _fast_then_maybe_deep() -> tuple[list[dict], bool]:
         posts = await _dispatcher.fast_scrape.scrape(url, os.devnull, do_download=False)
-        a = _dispatcher.assess(posts, url)
-        should_escalate = auto and a["incomplete"]
-        if not should_escalate and not auto:
-            # Round A 기본 경로: author_thread 후보 + incomplete면 auto 미지정이어도 승격.
-            has_candidate = _has_author_thread_candidate(posts, code=code, author=author)
-            should_escalate = has_candidate and a["incomplete"]
-        if should_escalate:
-            posts = await _dispatcher.scrape_threads_recursive(url, max_pages=max_pages)
-            return posts, True
+        if auto:
+            a = _dispatcher.assess(posts, url)
+            if a.get("incomplete"):
+                posts = await _dispatcher.scrape_threads_recursive(url, max_pages=max_pages)
+                return posts, True
         return posts, False
 
     return asyncio.run(_fast_then_maybe_deep())

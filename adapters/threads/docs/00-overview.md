@@ -8,9 +8,9 @@
 
 ## 1. 역할 (overview §5 라우팅 매트릭스)
 
-| 원글 텍스트 | 댓글(중첩 스레드) | 이미지/영상 | 완전성 판단 |
+| 원글 텍스트 | 기본 수집 범위 | 이미지/영상 | 완전성 판단 |
 |---|---|---|---|
-| **body_text**(root post.text) | **comments[]** — naver_blog/facebook과 달리 실제로 채움 | `--download` 시 media_paths | fast pass vs deep 크롤 자동/수동 승격 |
+| **body_text**(root post.text) | **comments[]** — 기본은 root author 글만. `--all-comments`는 fast 댓글, `--auto`/`--deep`은 전체 reply tree | `--download` 시 media_paths | raw fast 결과 기준의 자동/수동 deep 판단 |
 
 Threads의 고유값은 **중첩 댓글**이다. naver_blog(댓글 API 범위 밖)나 facebook(댓글 미수집 설계)과
 달리, threads는 vendored 스크래퍼가 이미 reply 트리를 추적하는 재귀 크롤러를 갖고 있어
@@ -23,9 +23,10 @@ Threads의 고유값은 **중첩 댓글**이다. naver_blog(댓글 API 범위 �
   이 세 커밋이 코어 가치이므로 scratch 재작성보다 이식이 압도적으로 저렴하다.
 - **스크래퍼 로직 리팩터 금지.** 이식 시 내부 import만 패키지 상대 import로 수정했다
   (`import media_utils` → `from . import media_utils`). 파싱·크롤 전략·휴리스틱은 원본 그대로.
-- **티어 디스패처를 그대로 노출.** `fetch(deep=False)`(기본)는 fast pass(~10초), 실제로
-  불완전해 보이면 `auto=True`로 자동 승격하거나 `deep=True`로 처음부터 재귀 크롤 강제.
-  fast/deep 선택 기준은 vendored `scrape.assess()`의 reply_count 휴리스미틱 그대로 사용.
+- **기본은 fast + 저자 전용.** `fetch()`는 root post와 같은 author의 post만 반환하며
+  타인 댓글·자동 deep 승격은 기본값에서 제외한다. `auto=True`는 불완전한 fast 결과만
+  deep으로 승격하고, `deep=True`는 처음부터 전체 reply tree를 수집한다.
+  `all_comments=True` 또는 CLI `--all-comments`는 fast pass에서도 타인 댓글을 보존한다.
 - **comments[]는 flat list, 순서·트리 구조 비보존.** vendored 스크래퍼는 결과를
   `{id: post}` map으로 수집한다(원본이 이미 dict 병합 방식) — 중첩 depth/parent-child
   관계 자체는 원본 스키마에 없다. root(`code` 일치)를 body_text로 분리하고 나머지를
@@ -69,7 +70,8 @@ adapters/threads/
 - **media_dir는 신뢰 입력:** media_dir/max_pages는 로컬 사용자가 지정하는 신뢰 입력이다 —
   어댑터는 경로 containment를 하지 않는다(youtube 어댑터와 동일한 경계 원칙, 기존 유지).
 - **playwright 지연 로드:** `parse_url`/`normalize`는 playwright 없이 import·테스트
-  가능. 실제 `fetch()` 호출 시에만 vendored 스크래퍼가 playwright를 기동한다.
+  가능. 실제 `fetch()` 호출 시에만 vendored 스크래퍼가 playwright를 기동한다. 설치된
+  Google Chrome을 우선 사용하며, 없거나 실행 불가하면 Playwright bundled Chromium으로 fallback한다.
 - **graceful degradation:** vendored 스크래퍼는 개별 페이지 실패를 삼키고(`except Exception:
   pass`) 계속 진행하는 방어적 설계다(원본 그대로 유지) — 어댑터 레벨에서 이를 감추지 않고
   `meta.completeness`(root_found/expected/captured/incomplete)로 정직하게 노출한다.
@@ -88,12 +90,18 @@ adapters/threads/
 `fast_scrape.COOKIE_FILE`/`threads_scraper_v2.COOKIE_FILE`가 동일 경로 참조)의 존재 여부.
 `false`면 비공개 계정/연령제한 포스트에서 fast pass가 실패하거나 불완전할 수 있다는 신호.
 
-`meta.completeness`: vendored `scrape.assess()` 결과 + 어댑터가 덧붙인 필드 — `root_found` ·
-`expected`(root의 reply_count) · `captured`(실제 수집된 댓글 수) · `incomplete`(captured <
-expected) · `scrape_mode`(`"fast"` 또는 `"deep"`) · `max_pages`(deep일 때만, 크롤 상한).
+`meta.completeness`: vendored `scrape.assess()`의 **필터 전 raw 결과** + 어댑터가 덧붙인 필드 —
+`root_found` · `expected`(root의 reply_count) · `captured`(실제 수집된 댓글 수) ·
+`incomplete`(captured < expected) · `scrape_mode`(`"fast"` 또는 `"deep"`) · `max_pages`(deep일 때만,
+크롤 상한) · `author_only`(기본 fast에서만 true) · `comments_filtered`(기본 수집 범위 때문에 제외한
+타인 댓글 수). `incomplete`는 저자 전용 필터와 무관한 raw 수집 품질 신호다.
 fast pass만 돌렸는데 incomplete=True면 `--deep` 또는 `--auto` 재시도를 권장하는 신호.
 deep 크롤도 `max_pages`로 절단될 수 있으므로 `incomplete=False`가 "완전 수집"을 보장하지
 않는다 — 최소한 몇 페이지까지 돌았는지는 `max_pages`로 확인 가능.
+
+**저자 전용 범위의 한계:** 기본 수집은 root post와 동일 author의 글만 남긴다. 따라서
+root에 대한 다른 사람의 답글·그 답글 아래의 대화는 기본 결과에 포함되지 않는다. 대화 전체가
+필요하면 `--all-comments`(fast에서 보이는 댓글) 또는 `--auto`/`--deep`을 명시한다.
 
 **root 포스트 미발견 시 실패 표면화:** `fetch()`는 `assessment.root_found`가 False면
 `RuntimeError`를 raise한다(스크랩 완전 실패가 exit 0 빈 dict로 위장되지 않는다). 원인은
@@ -112,14 +120,15 @@ python -m adapters.threads.cli fetch <URL>
     [--media-dir DIR]     # 다운로드 대상(기본 downloads), --download와 함께
     [--deep]              # fast pass 생략, 재귀 크롤부터
     [--auto]              # fast pass 불완전 시 자동 deep 승격
+    [--all-comments]      # fast pass에서도 타인 댓글 포함 수집(기본: 저자 전용)
     [--download]          # 이미지/영상 다운로드
     [--max-pages N]       # deep 크롤 최대 페이지 수(기본 100)
 ```
 
 ## 7. 의존성
 
-- **필수:** `playwright`(BSD-3, 원본 의존성 — `playwright install chromium` 별도 필요),
-  `parsel`(BSD-3, 임베디드 JSON `<script>` XPath 추출).
+- **필수:** `playwright`(BSD-3), `parsel`(BSD-3, 임베디드 JSON `<script>` XPath 추출).
+  설치된 Google Chrome이 있으면 그것을 사용하고, 없으면 setup이 bundled Chromium을 설치한다.
 
 ## 8. 라이선스·출처 (Attribution)
 

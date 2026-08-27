@@ -57,22 +57,19 @@ def _patched(fast_return, incomplete):
     )
 
 
-def test_escalates_by_default_when_candidate_and_incomplete():
+def test_no_escalation_by_default_even_with_candidate_and_incomplete():
     p_fast, p_assess, p_deep = _patched(FAST_WITH_CANDIDATE, incomplete=True)
     with p_fast, p_assess, p_deep as mock_deep:
-        posts, actual_deep = _run_scrape(URL, deep=False, auto=False, max_pages=100,
-                                          author="alice", code="ROOT")
-    mock_deep.assert_called_once()
-    assert posts == DEEP_RESULT
-    # post-review P1 fix: _run_scrape는 실제로 deep 경로를 탔는지도 반환해야 한다.
-    assert actual_deep is True
+        posts, actual_deep = _run_scrape(URL, deep=False, auto=False, max_pages=100)
+    mock_deep.assert_not_called()
+    assert posts == FAST_WITH_CANDIDATE
+    assert actual_deep is False
 
 
 def test_no_escalation_when_no_candidate_even_if_incomplete():
     p_fast, p_assess, p_deep = _patched(FAST_NO_CANDIDATE, incomplete=True)
     with p_fast, p_assess, p_deep as mock_deep:
-        posts, actual_deep = _run_scrape(URL, deep=False, auto=False, max_pages=100,
-                                          author="alice", code="ROOT")
+        posts, actual_deep = _run_scrape(URL, deep=False, auto=False, max_pages=100)
     mock_deep.assert_not_called()
     assert posts == FAST_NO_CANDIDATE
     assert actual_deep is False
@@ -81,19 +78,55 @@ def test_no_escalation_when_no_candidate_even_if_incomplete():
 def test_no_escalation_when_candidate_present_but_complete():
     p_fast, p_assess, p_deep = _patched(FAST_WITH_CANDIDATE, incomplete=False)
     with p_fast, p_assess, p_deep as mock_deep:
-        posts, actual_deep = _run_scrape(URL, deep=False, auto=False, max_pages=100,
-                                          author="alice", code="ROOT")
+        posts, actual_deep = _run_scrape(URL, deep=False, auto=False, max_pages=100)
     mock_deep.assert_not_called()
     assert posts == FAST_WITH_CANDIDATE
     assert actual_deep is False
+
+
+def test_default_fetch_is_fast_and_author_only():
+    # raw fast 수집은 댓글 2개를 모두 잡았고 complete다. 저자 전용 필터가 Bob 댓글을
+    # 숨겨도 meta.completeness는 이 원본 수집 사실을 보존해야 한다.
+    fast_assess = {"root_found": True, "expected": 2, "captured": 2, "incomplete": False}
+    mixed = FAST_WITH_CANDIDATE + [
+        {"id": "b1", "code": "B1", "author": "bob", "text": "other reply",
+         "likes": 0, "reply_count": 0, "images": [], "videos": []},
+    ]
+    with patch("adapters.threads.scrape.fast_scrape.scrape",
+               new=AsyncMock(return_value=mixed)):
+        with patch("adapters.threads.scrape.assess", return_value=fast_assess):
+            result = fetch("https://www.threads.net/@alice/post/ROOT")
+    assert result["body_text"] == "root"
+    assert len(result["author_thread"]) == 1
+    assert result["comments"] == []
+    completeness = result["meta"]["completeness"]
+    assert completeness["incomplete"] is False
+    assert completeness["author_only"] is True
+    assert completeness["comments_filtered"] == 1
+
+
+def test_fetch_all_comments_includes_other_authors():
+    fast_assess = {"root_found": True, "expected": 2, "captured": 2, "incomplete": False}
+    mixed = FAST_WITH_CANDIDATE + [
+        {"id": "b1", "code": "B1", "author": "bob", "text": "other reply",
+         "likes": 0, "reply_count": 0, "images": [], "videos": []},
+    ]
+    with patch("adapters.threads.scrape.fast_scrape.scrape",
+                new=AsyncMock(return_value=mixed)):
+        with patch("adapters.threads.scrape.assess", return_value=fast_assess):
+            result = fetch("https://www.threads.net/@alice/post/ROOT", all_comments=True)
+    assert result["body_text"] == "root"
+    assert len(result["author_thread"]) == 1
+    assert len(result["comments"]) == 1
+    assert result["comments"][0]["author"] == "bob"
+    assert "author_only" not in result["meta"]["completeness"]
 
 
 def test_explicit_auto_true_still_escalates_on_incomplete_regardless_of_candidate():
     # 회귀 테스트: auto=True 사용자 명시 시 기존 동작(candidate 무관, incomplete만 보고 승격)이 우선.
     p_fast, p_assess, p_deep = _patched(FAST_NO_CANDIDATE, incomplete=True)
     with p_fast, p_assess, p_deep as mock_deep:
-        posts, actual_deep = _run_scrape(URL, deep=False, auto=True, max_pages=100,
-                                          author="alice", code="ROOT")
+        posts, actual_deep = _run_scrape(URL, deep=False, auto=True, max_pages=100)
     mock_deep.assert_called_once()
     assert posts == DEEP_RESULT
     assert actual_deep is True
@@ -105,8 +138,7 @@ def test_explicit_deep_true_skips_fast_pass_entirely():
                new=AsyncMock(return_value=FAST_WITH_CANDIDATE)) as mock_fast, \
          patch("adapters.threads.scrape.scrape_threads_recursive",
                new=AsyncMock(return_value=DEEP_RESULT)) as mock_deep:
-        posts, actual_deep = _run_scrape(URL, deep=True, auto=False, max_pages=100,
-                                          author="alice", code="ROOT")
+        posts, actual_deep = _run_scrape(URL, deep=True, auto=False, max_pages=100)
     mock_fast.assert_not_called()
     mock_deep.assert_called_once()
     assert posts == DEEP_RESULT
@@ -115,19 +147,9 @@ def test_explicit_deep_true_skips_fast_pass_entirely():
 
 # ── post-review P1 fix: fetch()-level end-to-end — actual_deep must reach meta ──
 
-def test_fetch_reports_deep_true_and_scrape_mode_deep_after_default_escalation():
-    """post-review P1 (Codex meta review) 회귀 테스트.
-
-    §5 기본-승격 경로(auto=False/deep=False인데 candidate+incomplete로 deep까지
-    승격)를 fetch() 전체 경로로 실행했을 때, meta.author_thread.deep과
-    meta.completeness.scrape_mode가 실제 실행된 deep 크롤을 정직하게 반영하는지
-    확인한다. 수정 전에는 fetch()가 원래 인자 deep=False를 그대로 normalize()에
-    넘겨 이 두 필드가 거짓으로 "fast"/False를 보고했다.
-    """
-    # fast pass: candidate(alice의 연속글) 있음, incomplete=True로 승격 트리거.
+def test_fetch_reports_deep_true_when_explicit_auto_escalates():
+    """auto=True 명시 시 incomplete이면 deep으로 승격되고 meta에 반영된다."""
     fast_assess = {"root_found": True, "expected": 5, "captured": 1, "incomplete": True}
-    # deep pass 이후 재호출되는 assess(): 완전해졌다고 가정(별개 관심사 — 실제 deep
-    # 결과 posts에 대해 다시 assess가 호출되므로 두 번째 반환값을 따로 지정).
     deep_assess = {"root_found": True, "expected": 5, "captured": 2, "incomplete": False}
 
     with patch("adapters.threads.scrape.fast_scrape.scrape",
@@ -136,20 +158,14 @@ def test_fetch_reports_deep_true_and_scrape_mode_deep_after_default_escalation()
                new=AsyncMock(return_value=DEEP_RESULT)), \
          patch("adapters.threads.scrape.assess",
                side_effect=[fast_assess, deep_assess]) as mock_assess:
-        result = fetch("https://www.threads.net/@alice/post/ROOT", max_pages=100)
+        result = fetch("https://www.threads.net/@alice/post/ROOT", auto=True, max_pages=100)
 
-    # assess()가 두 번 호출됨을 확인: 1) fast 결과에 대해(에스컬레이션 판단),
-    # 2) fetch()가 deep 결과에 대해 재계산(root_found 체크용).
     assert mock_assess.call_count == 2
-
     meta_at = result["meta"]["author_thread"]
-    assert meta_at["deep"] is True, "actual_deep=True인데 meta.author_thread.deep이 거짓 False를 보고함"
+    assert meta_at["deep"] is True
     assert meta_at["max_pages"] == 100
-
     scrape_mode = result["meta"]["completeness"]["scrape_mode"]
-    assert scrape_mode == "deep", f"실제 deep 크롤 실행됐는데 scrape_mode={scrape_mode!r} (fast로 오보)"
-
-    # author_thread 분류 자체도 deep 크롤 결과(DEEP_RESULT, continuation 2개) 기준으로 맞는지.
+    assert scrape_mode == "deep"
     assert len(result["author_thread"]) == 2
 
 

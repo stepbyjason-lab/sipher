@@ -39,13 +39,22 @@ def parse_post(post_data: Dict) -> Dict:
     except Exception:
         return None
 
+
+async def _launch_browser(pw, *, headless: bool = True):
+    try:
+        return await pw.chromium.launch(channel="chrome", headless=headless)
+    except Exception as exc:
+        sys.stderr.write(f"[threads] Chrome launch failed ({exc}); falling back to bundled Chromium\n")
+        return await pw.chromium.launch(headless=headless)
+
+
 async def scrape_threads_recursive(start_url: str, max_pages: int = 15) -> List[Dict]:
     extracted_comments = {}
     urls_to_visit = [start_url]
     visited_urls = set()
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
+        browser = await _launch_browser(pw, headless=True)
         context = await browser.new_context(locale="en-US")
         page = await context.new_page()
 

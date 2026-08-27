@@ -92,6 +92,9 @@ def main(argv: list[str] | None = None) -> int:
     pf.add_argument("--auto", action="store_true",
                      help="(threads) fast pass, auto-escalate to deep when incomplete "
                           "(fast 후 불완전하면 deep 자동 승격)")
+    pf.add_argument("--all-comments", action="store_true", dest="all_comments",
+                    help="(threads) fast pass에서도 타인 댓글을 제외하지 않고 수집 "
+                         "(기본은 원글 및 저자 연속글만 수집)")
     pf.add_argument("--max-pages", type=int, default=None, dest="max_pages",
                      help="(threads) deep-crawl page cap (deep 크롤 페이지 상한)")
     pf.add_argument("--from-start", action="store_true", dest="from_start",
@@ -152,13 +155,13 @@ def main(argv: list[str] | None = None) -> int:
                              "(플랫폼 이름만 출력, 위임 없음)")
     pd.add_argument("url", help="URL to classify (판별할 URL)")
 
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     args = ap.parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
 
     if args.cmd == "detect":
         try:
@@ -180,6 +183,8 @@ def main(argv: list[str] | None = None) -> int:
         kwargs["deep"] = True
     if args.auto:
         kwargs["auto"] = True
+    if args.all_comments:
+        kwargs["all_comments"] = True
     if args.max_pages is not None:
         kwargs["max_pages"] = args.max_pages
     if args.from_start:

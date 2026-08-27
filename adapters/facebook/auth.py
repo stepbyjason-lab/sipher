@@ -95,13 +95,18 @@ def open_persistent_context(p: Playwright, profile_dir: str | Path, *,
     """user_data_dir 기반 영구 컨텍스트. 세션이 프로필 폴더에 남아 재로그인 불필요."""
     profile = Path(profile_dir)
     profile.mkdir(parents=True, exist_ok=True)
-    return p.chromium.launch_persistent_context(
-        user_data_dir=str(profile),
-        headless=headless,
-        locale=locale,
-        user_agent=ua,
-        viewport=DEFAULT_VIEWPORT,
-    )
+    kwargs = {
+        "user_data_dir": str(profile),
+        "headless": headless,
+        "locale": locale,
+        "user_agent": ua,
+        "viewport": DEFAULT_VIEWPORT,
+    }
+    try:
+        return p.chromium.launch_persistent_context(channel="chrome", **kwargs)
+    except Exception as exc:
+        _log.info("Facebook Chrome launch 실패(%s) — bundled Chromium으로 fallback", type(exc).__name__)
+        return p.chromium.launch_persistent_context(**kwargs)
 
 
 def login(p: Playwright, profile_dir: str | Path, *, timeout_sec: int = 300,
@@ -311,7 +316,11 @@ def authenticated_context(p: Playwright, mode: str = "persistent", *,
     else:
         raise AuthError(f"알 수 없는 auth mode: {mode!r} (persistent/browser/cookies_txt)")
 
-    browser = p.chromium.launch(headless=headless)
+    try:
+        browser = p.chromium.launch(channel="chrome", headless=headless)
+    except Exception as exc:
+        _log.info("Facebook Chrome launch 실패(%s) — bundled Chromium으로 fallback", type(exc).__name__)
+        browser = p.chromium.launch(headless=headless)
     try:
         ctx = browser.new_context(locale=DEFAULT_LOCALE, user_agent=DEFAULT_UA,
                                   viewport=DEFAULT_VIEWPORT)

@@ -79,13 +79,40 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-if ($Profile -eq "full" -or $Browsers) {
-    Write-Host "[sipher setup] playwright chromium 설치 시도(threads/facebook/web-tier2용)"
+function Test-ChromeAvailable {
+    if ($env:CHROME_BIN -and (Test-Path -LiteralPath $env:CHROME_BIN)) { return $true }
+    if (Get-Command "chrome" -ErrorAction SilentlyContinue) { return $true }
+    if (Get-Command "google-chrome" -ErrorAction SilentlyContinue) { return $true }
+    $chromePaths = @(
+        "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
+        "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
+        "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
+    )
+    foreach ($p in $chromePaths) {
+        if ($p -and (Test-Path -LiteralPath $p)) { return $true }
+    }
+    return $false
+}
+
+if ($Browsers) {
+    Write-Host "[sipher setup] -Browsers 지정됨 — playwright chromium 설치 시도(threads/facebook/web-tier2용)"
     & $VenvPy -m playwright install chromium
     if ($LASTEXITCODE -ne 0) {
         Write-Warning "[sipher setup] playwright chromium 설치 실패 — 해당 기능은 나중에 필요할 때 '$VenvPy -m playwright install chromium' 를 직접 실행하세요."
     } else {
         Write-Host "[sipher setup] playwright chromium 설치 완료"
+    }
+} elseif ($Profile -eq "full") {
+    if (Test-ChromeAvailable) {
+        Write-Host "[sipher setup] 시스템 Google Chrome 발견 — Playwright Chromium 중복 설치 생략 (Threads 등에서 Chrome 채널 사용)"
+    } else {
+        Write-Host "[sipher setup] Google Chrome 미발견 — playwright bundled chromium 설치 시도(threads/facebook/web-tier2용)"
+        & $VenvPy -m playwright install chromium
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "[sipher setup] playwright chromium 설치 실패 — Chrome을 설치하거나 '$VenvPy -m playwright install chromium' 를 직접 실행하세요."
+        } else {
+            Write-Host "[sipher setup] playwright chromium 설치 완료"
+        }
     }
 } else {
     Write-Host "[sipher setup] playwright 브라우저 설치 생략(lite 기본, -Browsers로 강제 가능)"
@@ -102,7 +129,7 @@ if ($Profile -eq "full") {
     Write-Host "  [ ] whisper 전사 도구 - core/transcribe.py, GPU large-v3 권장."
     Write-Host "  [ ] 로그인 세션      - threads(deep 크롤)/facebook/instagram 필수."
 }
-Write-Host "  [ ] playwright chromium - threads/facebook/web-tier2 사용 시(-Browsers로 설치)."
+Write-Host "  [ ] Google Chrome 또는 playwright chromium - threads/facebook/web-tier2 사용 시 (Chrome 미설치 시 -Browsers로 설치)."
 Write-Host ""
 Write-Host "없는 도구는 기능이 막히지 않고 정직 라벨로 degrade됩니다(예:"
 Write-Host 'conversion_label="skipped_no_tool"). 자세한 내용은 docs/08-packaging.md 참조.'

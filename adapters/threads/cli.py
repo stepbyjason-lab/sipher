@@ -34,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
     pf.add_argument("--media-dir", default=None, help="다운로드 대상 디렉토리(기본 downloads)")
     pf.add_argument("--deep", action="store_true", help="fast pass 생략, 재귀 크롤부터")
     pf.add_argument("--auto", action="store_true", help="fast pass 불완전 시 자동 deep 승격")
+    pf.add_argument("--all-comments", action="store_true", help="fast pass에서도 타인 댓글 포함 수집(기본: 저자 전용)")
     pf.add_argument("--download", action="store_true", help="이미지/영상 다운로드")
     pf.add_argument("--max-pages", type=int, default=100, dest="max_pages",
                     help="deep 크롤 최대 페이지 수(기본 100)")
@@ -50,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         result = fetch(
-            args.url, media_dir=args.media_dir, deep=args.deep, auto=args.auto,
+            args.url, media_dir=args.media_dir, deep=args.deep, auto=args.auto, all_comments=args.all_comments,
             download=args.download, max_pages=args.max_pages,
         )
     except KeyboardInterrupt:

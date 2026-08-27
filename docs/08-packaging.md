@@ -47,9 +47,10 @@ scripts/setup.ps1 [-Profile lite|full] [-Browsers]
 
 - 기본 프로필은 `lite`.
 - `.venv/`를 생성(이미 있으면 재사용 — 파괴하지 않음)하고 `requirements-<profile>.txt`를 설치한다.
-- `full` 프로필이거나 `--browsers`/`-Browsers` 플래그가 있으면
-  `python -m playwright install chromium`을 시도한다(실패해도 setup 자체는
-  성공 처리 — 안내만).
+- `full` 프로필은 설치된 Google Chrome을 우선 사용한다. Chrome이 없으면
+  `python -m playwright install chromium`으로 Playwright bundled Chromium을 설치한다.
+  `--browsers`/`-Browsers`는 Chrome 유무와 관계없이 bundled Chromium 설치를 강제한다.
+  브라우저 설치 실패는 setup 전체를 막지 않고 복구 안내로 남긴다.
 - 종료 시 "필요한 것" 체크리스트(GEMINI_API_KEY, ffmpeg, whisper, 로그인 세션 등)를 출력한다.
 - fail-fast: 잘못된 profile 인자·python 미발견 시 명확한 에러 메시지 + exit 1.
 
@@ -60,7 +61,7 @@ scripts/setup.ps1 [-Profile lite|full] [-Browsers]
 | ffmpeg | 포맷 병합·자막 변환 | youtube |
 | whisper 계열 전사 도구(GPU large-v3 권장) | 음성 전사(local backend, 최우선) | core/transcribe.py(FULL 권장, 없으면 Groq 폴백) |
 | ffmpeg(선택, Groq 경로) | 25MB 초과/영상 컨테이너를 오디오만 추출해 Groq 업로드(round-27) | core/transcribe.py — 없으면 해당 아이템 정직 skip |
-| playwright chromium 브라우저 바이너리 | 헤드리스 브라우저 크롤 | threads, facebook, instagram(간접), web tier2 |
+| Google Chrome 또는 Playwright bundled Chromium | 헤드리스 브라우저 크롤. Chrome을 우선 사용하고 없거나 실행 불가하면 bundled Chromium으로 fallback | threads, facebook, instagram(간접), web tier2 |
 
 ## 5. API 키 / 로그인 세션
 

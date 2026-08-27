@@ -2,7 +2,7 @@
 
 # Sipher
 
-> **현재 공개 버전: v0.1.0**
+> **현재 공개 버전: v0.1.1**
 
 **아무 URL이나 파일을 던지면 — 깨끗하게 정규화된 콘텐츠로 돌려줍니다.**
 
@@ -67,7 +67,7 @@ Sipher의 AI 보강은 **유료 키 없이 끝까지 돌아가도록** 설계됐
 
 | 소스 | 얻는 것 |
 |---|---|
-| **Threads** | 본문, **중첩 댓글**, 미디어. Fast pass → 불완전하면 deep 크롤로 자동 승격. |
+| **Threads** | 본문과 원글 작성자의 보이는 후속 글, 미디어를 기본 수집. 타인 댓글은 `--all-comments`, 조건부 deep 크롤은 `--auto`, 전체 reply tree는 `--deep`으로 명시. |
 | **YouTube** | 설명·메타·미디어, `--from-start`(라이브 처음부터), 라이브 채팅 replay, (옵션) 자막·댓글. |
 | **Facebook** | 본문, **풀사이즈 사진**(라이트박스 우회 + 숨은 `+N`장), 영상, **댓글 본문**(정직한 신뢰도 라벨). |
 | **Instagram** | 캡션·미디어·메타. 로그인 세션 필요(익명 접근 차단) — access 라벨로 정직 보고. |
@@ -93,7 +93,7 @@ Sipher의 AI 보강은 **유료 키 없이 끝까지 돌아가도록** 설계됐
 
 | 플랫폼 | 기반 | 자체 제작 / 수정 |
 |---|---|---|
-| **Threads** | [vdite/threads-scraper](https://github.com/vdite/threads-scraper) (MIT) fork | [우리 fork](https://github.com/stepbyjason-lab/threads-scraper)에서 3건 수정: 미디어 추출·다운로드, 대상 스레드 스코핑(추천 피드 오염 제거), fast→deep 티어 디스패처 |
+| **Threads** | [vdite/threads-scraper](https://github.com/vdite/threads-scraper) (MIT) fork | [우리 fork](https://github.com/stepbyjason-lab/threads-scraper)에서 3건 수정: 미디어 추출·다운로드, 대상 스레드 스코핑(추천 피드 오염 제거), fast/deep 티어 디스패처. sipher 기본은 fast 원글 작성자 수집이고, 전체 토론 수집은 명시 opt-in. |
 | **YouTube** | [yt-dlp](https://github.com/yt-dlp/yt-dlp) (Unlicense) | 얇은 래퍼 — `--from-start`·라이브 채팅 replay 결선과 정규화만 자체 |
 | **Facebook** | **저자가 직접 제작** | 라이트박스 우회 풀사이즈 사진·숨은 `+N`장·댓글 수집 — 공개 대체재가 없어 직접 만듦 |
 | **Instagram** | [instaloader](https://github.com/instaloader/instaloader) (MIT) | 라이브러리 직접 호출 + 정직한 access 라벨 계층은 자체 |

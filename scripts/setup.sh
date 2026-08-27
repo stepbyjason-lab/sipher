@@ -86,13 +86,40 @@ echo "[sipher setup] pip 업그레이드"
 echo "[sipher setup] $REQ_FILE 설치"
 "$VENV_PY" -m pip install -r "$REQ_FILE"
 
-if [[ "$PROFILE" == "full" || "$INSTALL_BROWSERS" -eq 1 ]]; then
-  echo "[sipher setup] playwright chromium 설치 시도(threads/facebook/web-tier2용)"
+has_chrome() {
+  if [[ -n "${CHROME_BIN:-}" && -x "$CHROME_BIN" ]]; then
+    return 0
+  fi
+  for cmd in google-chrome google-chrome-stable chrome; do
+    if command -v "$cmd" >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  if [[ -d "/Applications/Google Chrome.app" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+if [[ "$INSTALL_BROWSERS" -eq 1 ]]; then
+  echo "[sipher setup] --browsers 지정됨 — playwright chromium 설치 시도(threads/facebook/web-tier2용)"
   if "$VENV_PY" -m playwright install chromium; then
     echo "[sipher setup] playwright chromium 설치 완료"
   else
     echo "[sipher setup][경고] playwright chromium 설치 실패 — 해당 기능은 나중에 필요할 때" \
          "'$VENV_PY -m playwright install chromium' 를 직접 실행하세요." >&2
+  fi
+elif [[ "$PROFILE" == "full" ]]; then
+  if has_chrome; then
+    echo "[sipher setup] 시스템 Google Chrome 발견 — Playwright Chromium 중복 설치 생략 (Threads 등에서 Chrome 채널 사용)"
+  else
+    echo "[sipher setup] Google Chrome 미발견 — playwright bundled chromium 설치 시도(threads/facebook/web-tier2용)"
+    if "$VENV_PY" -m playwright install chromium; then
+      echo "[sipher setup] playwright chromium 설치 완료"
+    else
+      echo "[sipher setup][경고] playwright chromium 설치 실패 — Chrome을 설치하거나" \
+           "'$VENV_PY -m playwright install chromium' 를 직접 실행하세요." >&2
+    fi
   fi
 else
   echo "[sipher setup] playwright 브라우저 설치 생략(lite 기본, --browsers로 강제 가능)"
@@ -109,7 +136,7 @@ if [[ "$PROFILE" == "full" ]]; then
   echo "  [ ] whisper 전사 도구 — core/transcribe.py, GPU large-v3 권장."
   echo "  [ ] 로그인 세션      — threads(deep 크롤)/facebook/instagram 필수."
 fi
-echo "  [ ] playwright chromium — threads/facebook/web-tier2 사용 시(--browsers로 설치)."
+echo "  [ ] Google Chrome 또는 playwright chromium — threads/facebook/web-tier2 사용 시 (Chrome 미설치 시 --browsers로 설치)."
 echo ""
 echo "없는 도구는 기능이 막히지 않고 정직 라벨로 degrade됩니다(예:"
 echo "conversion_label=\"skipped_no_tool\"). 자세한 내용은 docs/08-packaging.md 참조."

@@ -130,13 +130,21 @@ async def scroll_and_expand(page, extracted_comments: Dict, max_stale_rounds: in
             stale_rounds += 1
 
 
+async def _launch_browser(pw, *, headless: bool = True):
+    try:
+        return await pw.chromium.launch(channel="chrome", headless=headless)
+    except Exception as exc:
+        sys.stderr.write(f"[threads] Chrome launch failed ({exc}); falling back to bundled Chromium\n")
+        return await pw.chromium.launch(headless=headless)
+
+
 async def do_login(pw):
     """Opens a visible browser for manual login. Saves cookies afterwards."""
     print("\n  === LOGIN MODE ===", file=sys.stderr)
     print("  A browser window will open. Please log in to Threads/Instagram.", file=sys.stderr)
     print("  After login is complete, cookies will be saved automatically.\n", file=sys.stderr)
 
-    browser = await pw.chromium.launch(headless=False)
+    browser = await _launch_browser(pw, headless=False)
     context = await browser.new_context(locale="en-US")
     page = await context.new_page()
 
@@ -192,7 +200,7 @@ async def scrape_threads_recursive(start_url: str, max_pages: int = 100) -> List
     print(f"  Cookies: {'loaded' if has_cookies else 'none (run with --login to authenticate)'}\n", file=sys.stderr)
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
+        browser = await _launch_browser(pw, headless=True)
         context = await browser.new_context(locale="en-US")
 
         # Load saved cookies if available

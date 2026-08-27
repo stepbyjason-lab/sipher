@@ -44,10 +44,18 @@ def parse_post(p):
         return None
 
 
+async def _launch_browser(pw, *, headless: bool = True):
+    try:
+        return await pw.chromium.launch(channel="chrome", headless=headless)
+    except Exception as exc:
+        sys.stderr.write(f"[threads] Chrome launch failed ({exc}); falling back to bundled Chromium\n")
+        return await pw.chromium.launch(headless=headless)
+
+
 async def scrape(url, out, do_download=False):
     found = {}
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
+        browser = await _launch_browser(pw, headless=True)
         ctx = await browser.new_context(locale="en-US")
         if os.path.exists(COOKIE_FILE):
             with open(COOKIE_FILE) as f:

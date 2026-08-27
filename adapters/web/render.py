@@ -131,7 +131,10 @@ def render_js(url: str, *, timeout: int = _DEFAULT_TIMEOUT_S) -> str:
 
     try:
         with sync_playwright() as pw:
-            browser = pw.chromium.launch(headless=True)
+            try:
+                browser = pw.chromium.launch(channel="chrome", headless=True)
+            except PlaywrightError:
+                browser = pw.chromium.launch(headless=True)
             try:
                 context = browser.new_context()
                 try:

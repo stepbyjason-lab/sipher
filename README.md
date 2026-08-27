@@ -2,7 +2,7 @@
 
 # Sipher
 
-> **Current public release: v0.1.0**
+> **Current public release: v0.1.1**
 
 **Throw any URL or file at it — get back clean, normalized content.**<br>
 **아무 URL이나 파일을 던지면 — 깨끗하게 정규화된 콘텐츠로 돌려줍니다.**
@@ -79,7 +79,7 @@ credit card.
 
 | Source | What you get |
 |---|---|
-| **Threads** | Post body, **nested comments**, media. Fast pass → auto-escalates to a deep crawl when incomplete. |
+| **Threads** | Post body plus the root author’s visible follow-ups by default, media. Use `--all-comments` for visible replies, `--auto` for conditional deep crawl, or `--deep` for the full reply tree. |
 | **YouTube** | Description, metadata, media, `--from-start` (live from the beginning), live-chat replay, optional transcript & comments. |
 | **Facebook** | Body, **full-size photos** (lightbox bypass + hidden `+N` shots), video, and **comment bodies** with honest confidence labels. |
 | **Instagram** | Caption, media, metadata. Login session required (Instagram blocks anonymous access) — reported honestly via access labels. |
@@ -107,7 +107,7 @@ runs underneath — and what the author wrote from scratch vs. open source:
 
 | Platform | Based on | Home-grown / modified |
 |---|---|---|
-| **Threads** | fork of [vdite/threads-scraper](https://github.com/vdite/threads-scraper) (MIT) | 3 modifications in [our fork](https://github.com/stepbyjason-lab/threads-scraper): media extraction & download, target-thread scoping (drops recommended-feed noise), fast→deep tiered dispatcher |
+| **Threads** | fork of [vdite/threads-scraper](https://github.com/vdite/threads-scraper) (MIT) | 3 modifications in [our fork](https://github.com/stepbyjason-lab/threads-scraper): media extraction & download, target-thread scoping (drops recommended-feed noise), fast/deep tiered dispatcher. Sipher defaults to fast root-author collection; full discussion crawling is opt-in. |
 | **YouTube** | [yt-dlp](https://github.com/yt-dlp/yt-dlp) (Unlicense) | Thin wrapper — only the `--from-start` / live-chat-replay wiring and normalization are ours |
 | **Facebook** | **Written by the author** | Lightbox-bypass full-size photos, hidden `+N` shots, comment collection — built from scratch because no public alternative exists |
 | **Instagram** | [instaloader](https://github.com/instaloader/instaloader) (MIT) | Direct library calls + our honest access-label layer |
