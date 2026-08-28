@@ -46,7 +46,7 @@ def test_share_redirect_resolves_and_fetch_uses_canonical_author_code(monkeypatc
         calls.append((url, allow_redirects, timeout))
         return _Response(302, final_url)
 
-    def fake_run(url, *, deep, auto, max_pages, author, code):
+    def fake_run(url, *, deep, auto, max_pages, author, code, progress=None):
         assert url == "https://www.threads.net/@conanssam/post/Dbno1iNk6un"
         assert (author, code) == ("conanssam", "Dbno1iNk6un")
         return ([{

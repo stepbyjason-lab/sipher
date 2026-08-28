@@ -27,6 +27,15 @@ Threads의 고유값은 **중첩 댓글**이다. naver_blog(댓글 API 범위 �
   타인 댓글·자동 deep 승격은 기본값에서 제외한다. `auto=True`는 불완전한 fast 결과만
   deep으로 승격하고, `deep=True`는 처음부터 전체 reply tree를 수집한다.
   `all_comments=True` 또는 CLI `--all-comments`는 fast pass에서도 타인 댓글을 보존한다.
+- **접힌 텍스트 카드는 JSON 정본으로 보존한다.** `caption.text`뿐 아니라
+  `text_post_app_info.text_fragments`와 `snippet_attachment_info.text_fragments`를
+  `text_blocks[]`에 출처별로 남긴다. 화면의 "더 보기"는 OCR 대상이 아니라 이미 받은
+  rich-text 원문을 접어 보이는 UI다. 기본 fast는 rich-text 전문이 없는 원저자 post의
+  후속글만 최대 8개 URL·2 hop까지 재조회하며, 전체 댓글 deep crawl은 하지 않는다.
+- **진행·부분 수집은 별도 계약이다.** `fetch(progress=callback)`은 root fast와
+  원저자 continuation의 상태 event를 callback으로 보낸다. adapter/core CLI는 event를
+  stderr JSON Lines로 내고 stdout에는 최종 JSON만 남긴다. 기본 continuation은 45초
+  wall-clock 예산을 넘기면 root와 확보된 원저자 결과를 `partial` 상태로 반환한다.
 - **comments[]는 flat list, 순서·트리 구조 비보존.** vendored 스크래퍼는 결과를
   `{id: post}` map으로 수집한다(원본이 이미 dict 병합 방식) — 중첩 depth/parent-child
   관계 자체는 원본 스키마에 없다. root(`code` 일치)를 body_text로 분리하고 나머지를
@@ -103,6 +112,18 @@ deep 크롤도 `max_pages`로 절단될 수 있으므로 `incomplete=False`가 "
 root에 대한 다른 사람의 답글·그 답글 아래의 대화는 기본 결과에 포함되지 않는다. 대화 전체가
 필요하면 `--all-comments`(fast에서 보이는 댓글) 또는 `--auto`/`--deep`을 명시한다.
 
+`author_thread[]`/`comments[]`의 각 item은 기존 `text`와 `media_paths` 외
+`text_blocks[]`를 가진다. 각 block은 `{source, text}`이며 source는 `caption`,
+`text_fragment`, `snippet_attachment` 중 하나다. `meta.author_thread.resolution`은
+기본 원저자 후속글 해소의 시도 페이지 수·발견 수·상한 소진 여부·실패한 post code를 기록하며, 이것이
+원저자 thread 전체의 완전 수집을 뜻하지는 않는다.
+
+`meta.author_thread.resolution.status`는 `complete`(정책 범위의 후보 해소 완료),
+`partial`(시간·페이지·hop 상한 또는 child 실패로 일부 후보 미해소), `not_run`(명시 수집
+모드)을 구분한다. `partial`일 때 `partial_reason`/`partial_reasons`, `elapsed_ms`,
+`time_budget_seconds`, `time_budget_exhausted`가 함께 남는다. root post 자체를 못 찾으면
+부분 수집으로 위장하지 않고 기존처럼 `RuntimeError`/CLI exit 1이다.
+
 **root 포스트 미발견 시 실패 표면화:** `fetch()`는 `assessment.root_found`가 False면
 `RuntimeError`를 raise한다(스크랩 완전 실패가 exit 0 빈 dict로 위장되지 않는다). 원인은
 네트워크 오류, 쿠키 만료, 차단, 잘못된 URL 등일 수 있다. CLI는 이를 exit 1로 표면화한다.
@@ -124,6 +145,11 @@ python -m adapters.threads.cli fetch <URL>
     [--download]          # 이미지/영상 다운로드
     [--max-pages N]       # deep 크롤 최대 페이지 수(기본 100)
 ```
+
+`fetch` 실행 중 stderr에는 `{ "type": "progress", ... }` JSON Lines가 나온다. 예:
+`share_resolved` → `fast_started` → `fast_complete` → `continuation_started`/`continuation_complete`
+→ `collection_complete`. continuation 시간 예산이 끝나면 `continuation_partial` 뒤에도
+stdout JSON은 정상 반환된다.
 
 ## 7. 의존성
 

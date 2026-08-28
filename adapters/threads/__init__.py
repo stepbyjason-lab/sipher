@@ -17,9 +17,10 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 from urllib.parse import urljoin, urlsplit
 
 import requests
@@ -42,6 +43,22 @@ _POST_PATH = re.compile(r"/@(?P<author>[A-Za-z0-9_.]+)/post/(?P<code>[A-Za-z0-9_
 _SHARE_PATH = re.compile(r"^/share/(?P<code>[A-Za-z0-9_-]+)/?$", re.I)
 _MAX_SHARE_REDIRECT_HOPS = 3
 _SHARE_RESOLVE_TIMEOUT = 30
+_AUTHOR_CONTINUATION_MAX_PAGES = 8
+_AUTHOR_CONTINUATION_MAX_HOPS = 2
+_AUTHOR_CONTINUATION_TIME_BUDGET_SECONDS = 45.0
+
+ProgressCallback = Callable[[dict], None]
+
+
+def _emit_progress(callback: ProgressCallback | None, event: str, *, started_at: float, **fields) -> None:
+    """진행 관찰자에만 event를 전달한다. callback 오류는 수집을 실패시키지 않는다."""
+    if callback is None:
+        return
+    payload = {"event": event, "elapsed_ms": int((time.monotonic() - started_at) * 1000), **fields}
+    try:
+        callback(payload)
+    except Exception as exc:
+        _log.debug("threads: progress callback 실패(무시): %s", type(exc).__name__)
 
 
 def parse_url(url: str) -> tuple[str, str]:
@@ -136,25 +153,159 @@ def _media_label(posts: list[dict], *, downloaded: bool) -> MediaLabel:
     return "downloaded"
 
 
-def _has_author_thread_candidate(posts: list[dict], *, code: str, author: str) -> bool:
-    """fast 결과에 root author가 쓴 non-root(연속글 후보)가 하나라도 있는지.
+def _post_key(post: dict) -> str | None:
+    """원저자 continuation 병합용 안정 키. id가 없을 때 code로 degrade한다."""
+    value = post.get("id") or post.get("code")
+    return str(value) if value else None
 
-    §3 분류 규칙과 동일한 기준(코드 불일치 + author 일치)을 재사용한다 — 승격 판단과
-    최종 분류가 서로 다른 기준으로 어긋나지 않게 하기 위함(round-A 계약 §5).
-    """
-    root = next((p for p in posts if p.get("code") == code), None)
-    root_author = (root or {}).get("author") or author
-    if not root_author:
-        return False
+
+def _has_snippet_attachment(post: dict) -> bool:
     return any(
-        p.get("code") != code and p.get("author") == root_author
-        for p in posts
+        block.get("source") == "snippet_attachment" and block.get("text")
+        for block in (post.get("text_blocks") or [])
+        if isinstance(block, dict)
     )
+
+
+def _resolve_author_continuations(
+    posts: list[dict], *, author: str, root_code: str,
+    progress: ProgressCallback | None = None, started_at: float | None = None,
+) -> tuple[list[dict], dict]:
+    """기본 fast 결과에서 공개된 원저자 후속글만 제한적으로 해소한다.
+
+    전체 댓글 tree를 deep crawl하지 않는다. rich-text 전문이 아직 없는 원저자 post 중
+    reply_count가 있는 것만 각 post URL로 fast 재조회하고, 그 결과에서도 원저자 post만
+    병합한다. page/hop 상한은 결과 metadata로 정직하게 노출한다.
+    """
+    continuation_started_at = time.monotonic()
+    started_at = started_at if started_at is not None else continuation_started_at
+    deadline = continuation_started_at + _AUTHOR_CONTINUATION_TIME_BUDGET_SECONDS
+    merged = list(posts)
+    known = {_post_key(post) for post in merged if _post_key(post)}
+    queue: list[tuple[str, int]] = []
+    queued: set[str] = set()
+    attempted_codes: set[str] = set()
+    hop_limit_reached = False
+    failed_pages: list[dict[str, str]] = []
+    time_budget_exhausted = False
+
+    def enqueue(post: dict, depth: int) -> None:
+        nonlocal hop_limit_reached
+        post_code = post.get("code")
+        if (
+            not post_code or post_code == root_code or post.get("author") != author
+            or not post.get("reply_count") or _has_snippet_attachment(post)
+            or post_code in attempted_codes or post_code in queued
+        ):
+            return
+        if depth > _AUTHOR_CONTINUATION_MAX_HOPS:
+            hop_limit_reached = True
+            return
+        queued.add(post_code)
+        queue.append((post_code, depth))
+
+    for post in merged:
+        enqueue(post, 1)
+
+    attempted_pages = 0
+    discovered_posts = 0
+    while queue and attempted_pages < _AUTHOR_CONTINUATION_MAX_PAGES:
+        if time.monotonic() >= deadline:
+            time_budget_exhausted = True
+            break
+        post_code, depth = queue.pop(0)
+        attempted_codes.add(post_code)
+        attempted_pages += 1
+        child_url = f"https://www.threads.net/@{author}/post/{post_code}"
+        _emit_progress(
+            progress, "continuation_started", started_at=started_at,
+            post_code=post_code, attempted_pages=attempted_pages,
+            unresolved_candidates=len(queue),
+        )
+        try:
+            fetched, actual_deep = _run_scrape(
+                child_url, deep=False, auto=False, max_pages=100,
+                progress=lambda event, **fields: _emit_progress(
+                    progress, event, started_at=started_at, post_code=post_code, **fields,
+                ),
+            )
+        except Exception as exc:  # 원 post는 이미 확보했으므로 후속 해소 실패는 fail-open metadata로 남긴다.
+            _log.warning("threads: 원저자 후속글 해소 실패(%s): %s", post_code, type(exc).__name__)
+            failed_pages.append({"code": post_code, "reason": type(exc).__name__})
+            _emit_progress(progress, "continuation_complete", started_at=started_at,
+                           post_code=post_code, result="failed")
+            continue
+        if actual_deep:  # 방어: 이 경로는 기본 fast-only 계약을 절대 깨지 않는다.
+            _log.warning("threads: continuation resolver가 deep 결과를 반환해 무시함: %s", post_code)
+            failed_pages.append({"code": post_code, "reason": "unexpected_deep_result"})
+            _emit_progress(progress, "continuation_complete", started_at=started_at,
+                           post_code=post_code, result="unexpected_deep")
+            continue
+        child_assessment = _dispatcher.assess(fetched, child_url)
+        if not child_assessment.get("root_found"):
+            failed_pages.append({"code": post_code, "reason": "root_not_found"})
+            _emit_progress(progress, "continuation_complete", started_at=started_at,
+                           post_code=post_code, result="root_not_found")
+            continue
+        for child in fetched:
+            if child.get("author") != author:
+                continue
+            key = _post_key(child)
+            if key and key not in known:
+                known.add(key)
+                merged.append(child)
+                discovered_posts += 1
+                enqueue(child, depth + 1)
+
+        _emit_progress(
+            progress, "continuation_complete", started_at=started_at,
+            post_code=post_code, result="collected", discovered_posts=discovered_posts,
+            unresolved_candidates=len(queue),
+        )
+
+    if attempted_pages and time.monotonic() >= deadline:
+        time_budget_exhausted = True
+    page_budget_exhausted = bool(queue and attempted_pages >= _AUTHOR_CONTINUATION_MAX_PAGES)
+    partial_reasons = []
+    if time_budget_exhausted:
+        partial_reasons.append("time_budget_exhausted")
+    if page_budget_exhausted:
+        partial_reasons.append("page_budget_exhausted")
+    if hop_limit_reached:
+        partial_reasons.append("hop_limit_reached")
+    if failed_pages:
+        partial_reasons.append("continuation_failed")
+    status = "partial" if partial_reasons else "complete"
+    elapsed_ms = int((time.monotonic() - continuation_started_at) * 1000)
+    if status == "partial":
+        _emit_progress(
+            progress, "continuation_partial", started_at=started_at,
+            partial_reason=partial_reasons[0], partial_reasons=partial_reasons,
+            unresolved_candidates=len(queue), elapsed_ms_continuation=elapsed_ms,
+        )
+
+    return merged, {
+        "mode": "fast_author_continuation",
+        "status": status,
+        "partial_reason": partial_reasons[0] if partial_reasons else None,
+        "partial_reasons": partial_reasons,
+        "attempted_pages": attempted_pages,
+        "discovered_posts": discovered_posts,
+        "page_budget": _AUTHOR_CONTINUATION_MAX_PAGES,
+        "hop_limit": _AUTHOR_CONTINUATION_MAX_HOPS,
+        "page_budget_exhausted": page_budget_exhausted,
+        "hop_limit_reached": hop_limit_reached,
+        "unresolved_candidates": len(queue),
+        "failed_pages": failed_pages,
+        "time_budget_seconds": _AUTHOR_CONTINUATION_TIME_BUDGET_SECONDS,
+        "time_budget_exhausted": time_budget_exhausted,
+        "elapsed_ms": elapsed_ms,
+    }
 
 
 def fetch(url: str, *, media_dir: str | Path | None = None, deep: bool = False,
           auto: bool = False, all_comments: bool = False, download: bool = False,
-          max_pages: int = 100) -> dict:
+          max_pages: int = 100, progress: ProgressCallback | None = None) -> dict:
     """단일 Threads 포스트 URL → 정규화 JSON dict.
 
     - 기본(deep=False, auto=False): 빠른 단일 패스(fast_scrape) + 저자 전용(author-only).
@@ -170,18 +321,34 @@ def fetch(url: str, *, media_dir: str | Path | None = None, deep: bool = False,
     """
     # round-38C: share URL만 별도 네트워크 경계에서 해석한 뒤, parse_url()을 최종
     # 화이트리스트·post path 게이트로 다시 통과시킨다.
+    started_at = time.monotonic()
+    original_url = url
     url = _resolve_share_url(url)
     author, code = parse_url(url)
+    _emit_progress(progress, "share_resolved", started_at=started_at,
+                   share_url=original_url if _is_share_url(original_url) else None,
+                   author=author, post_code=code)
     out_dir = str(media_dir) if media_dir else "downloads"
     # 검증된 author/code로 canonical URL을 재구성해 스크래퍼에 넘긴다 — 원본 url을
     # playwright goto로 그대로 전달하지 않는다(youtube 어댑터의 인자 인젝션 방어 패턴과 동일).
     # query/fragment는 이 재구성으로 자연히 제거된다.
     canonical = f"https://www.threads.net/@{author}/post/{code}"
 
+    _emit_progress(progress, "fast_started", started_at=started_at, post_code=code)
     posts, actual_deep = _run_scrape(
         canonical, deep=deep, auto=auto, max_pages=max_pages, author=author, code=code,
+        progress=lambda event, **fields: _emit_progress(progress, event, started_at=started_at, **fields),
     )
     assessment = _dispatcher.assess(posts, canonical)
+    _emit_progress(progress, "fast_complete", started_at=started_at,
+                   post_code=code, post_count=len(posts), root_found=bool(assessment.get("root_found")))
+    if not assessment.get("root_found"):
+        _emit_progress(progress, "collection_failed", started_at=started_at,
+                       reason="root_not_found", post_code=code)
+        raise RuntimeError(
+            "threads: root 포스트를 찾지 못함 — 스크랩 실패 가능(네트워크/쿠키만료/차단/잘못된 URL)"
+        )
+    continuation_resolution = {"mode": "not_run", "status": "not_run", "reason": "explicit_collection_mode"}
     if not deep and not actual_deep and not all_comments:
         root = next((p for p in posts if p.get("code") == code), None)
         root_author = (root or {}).get("author") or author
@@ -195,11 +362,10 @@ def fetch(url: str, *, media_dir: str | Path | None = None, deep: bool = False,
             "author_only": True,
             "comments_filtered": raw_post_count - len(posts),
         }
-
-    if not assessment.get("root_found"):
-        raise RuntimeError(
-            "threads: root 포스트를 찾지 못함 — 스크랩 실패 가능(네트워크/쿠키만료/차단/잘못된 URL)"
-        )
+        if not auto and root_author:
+            posts, continuation_resolution = _resolve_author_continuations(
+                posts, author=root_author, root_code=code, progress=progress, started_at=started_at,
+            )
 
     if download:
         download_media(posts, out_dir=out_dir)
@@ -208,13 +374,19 @@ def fetch(url: str, *, media_dir: str | Path | None = None, deep: bool = False,
     # 호출 인자 deep을 그대로 넘기면 §5 기본-승격 경로로 deep 크롤이 실제 실행됐는데도
     # meta.author_thread.deep/scrape_mode가 거짓으로 "fast"를 보고하는 버그가 있었다
     # (post-review P1, Codex meta review로 발견·확인).
-    return normalize(posts, source=url, author=author, code=code,
-                     assessment=assessment, downloaded=download,
-                     deep=actual_deep, max_pages=max_pages)
+    result = normalize(posts, source=url, author=author, code=code,
+                       assessment=assessment, downloaded=download,
+                       deep=actual_deep, max_pages=max_pages,
+                       continuation_resolution=continuation_resolution)
+    _emit_progress(progress, "collection_complete", started_at=started_at,
+                   status=continuation_resolution.get("status", "not_run"),
+                   author_thread_count=len(result["author_thread"]),
+                   comments_count=len(result["comments"]))
+    return result
 
 
 def _run_scrape(url: str, *, deep: bool, auto: bool, max_pages: int,
-                author: str = "", code: str = "") -> tuple[list[dict], bool]:
+                author: str = "", code: str = "", progress=None) -> tuple[list[dict], bool]:
     """asyncio 이벤트 루프 기동 + vendored 티어 디스패처 호출을 감싸는 동기 경계.
 
     vendored fast_scrape.scrape()/scrape_threads_recursive()/assess()를 그대로
@@ -224,15 +396,12 @@ def _run_scrape(url: str, *, deep: bool, auto: bool, max_pages: int,
     fast_scrape.scrape()는 결과를 JSON 파일로도 쓰는 시그니처라 os.devnull을
     out 경로로 넘겨 어댑터 호출 시 잔여 파일을 남기지 않는다.
 
-    [Round A Amendment] auto=False/deep=False(기본)이어도, fast 결과에
-    author_thread 후보가 있고 assess().incomplete가 True면 deep으로 승격한다
-    (§5 트리거 — 새 휴리스틱을 발명하지 않고 기존 assess().incomplete를 재사용).
-    사용자가 auto=True 또는 deep=True를 명시하면 그 기존 동작이 우선한다.
+    기본 경로는 fast pass에서 멈춘다. auto=True일 때만 assess().incomplete를 보고
+    명시적으로 deep으로 승격한다.
 
     반환값: (posts, actual_deep). actual_deep은 호출자가 넘긴 `deep` 인자가 아니라
     "실제로 deep 크롤(scrape_threads_recursive)이 이 호출에서 실행됐는지"를 뜻한다
-    — explicit deep=True든, explicit auto=True+incomplete든, §5 기본-승격
-    트리거든 어느 경로로 승격했든 True. fetch()는 이 실제 값을 normalize()에 넘겨야
+    — explicit deep=True든, explicit auto=True+incomplete든 True. fetch()는 이 실제 값을 normalize()에 넘겨야
     meta.author_thread.deep/scrape_mode가 정직하다(post-review P1 픽스 — 이전에는
     fetch()가 원래 `deep` 인자를 그대로 normalize에 넘겨, 기본-승격 경로로 deep이
     실제 실행돼도 meta가 거짓으로 "fast"를 보고했다).
@@ -245,7 +414,9 @@ def _run_scrape(url: str, *, deep: bool, auto: bool, max_pages: int,
         return posts, True
 
     async def _fast_then_maybe_deep() -> tuple[list[dict], bool]:
-        posts = await _dispatcher.fast_scrape.scrape(url, os.devnull, do_download=False)
+        posts = await _dispatcher.fast_scrape.scrape(
+            url, os.devnull, do_download=False, progress=progress,
+        )
         if auto:
             a = _dispatcher.assess(posts, url)
             if a.get("incomplete"):
@@ -266,12 +437,14 @@ def _item_shape(p: dict) -> dict:
         "likes": p.get("likes", 0),
         "reply_count": p.get("reply_count", 0),
         "media_paths": p.get("downloaded") or [],
+        "text_blocks": list(p.get("text_blocks") or []),
     }
 
 
 def normalize(posts: list[dict], *, source: str, author: str, code: str,
               assessment: dict | None = None, downloaded: bool = False,
-              deep: bool = False, max_pages: int | None = None) -> dict:
+              deep: bool = False, max_pages: int | None = None,
+              continuation_resolution: dict | None = None) -> dict:
     """vendored 스크래퍼 결과(flat post list) → sipher 정규화 스키마. 공개 API.
 
     posts는 원 스레드 글(code == 요청 code) + 댓글(그 외)이 뒤섞인 flat list다
@@ -372,6 +545,7 @@ def normalize(posts: list[dict], *, source: str, author: str, code: str,
                     "vendored parse_post()에 parent/reply-target 필드가 없어 "
                     "'자기 연속글'과 '자기가 타인 댓글에 남긴 답글'을 구분할 수 없음"
                 ),
+                "resolution": dict(continuation_resolution or {"mode": "not_run", "reason": "not_provided"}),
             },
             "fetched_at": datetime.now(timezone.utc).isoformat(),
         },

@@ -65,9 +65,24 @@ def test_comments_item_shape_matches_author_thread_item_shape():
     ]
     result = normalize(posts, source="src", author="alice", code="ROOT")
 
-    expected_keys = {"id", "code", "author", "text", "likes", "reply_count", "media_paths"}
+    expected_keys = {"id", "code", "author", "text", "likes", "reply_count", "media_paths", "text_blocks"}
     assert set(result["author_thread"][0].keys()) == expected_keys
     assert set(result["comments"][0].keys()) == expected_keys
+
+
+def test_text_blocks_are_preserved_without_changing_existing_text_field():
+    blocks = [
+        {"source": "caption", "text": "프롬프트:"},
+        {"source": "snippet_attachment", "text": "full prompt"},
+    ]
+    posts = [
+        _post(code="ROOT", author="alice", text="root"),
+        _post(code="C1", author="alice", text="프롬프트:\n\nfull prompt", text_blocks=blocks),
+    ]
+    result = normalize(posts, source="src", author="alice", code="ROOT")
+    item = result["author_thread"][0]
+    assert item["text"] == "프롬프트:\n\nfull prompt"
+    assert item["text_blocks"] == blocks
 
 
 # ── root author fallback: root에 author 없을 때 함수 인자 author로 대체 ──

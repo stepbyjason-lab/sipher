@@ -64,6 +64,11 @@ from .render import render_markdown
 _log = logging.getLogger(__name__)
 
 
+def _write_threads_progress(event: dict) -> None:
+    """Threads 수집 진행은 stderr JSONL로만 내보내 stdout 결과 계약을 보존한다."""
+    print(json.dumps({"type": "progress", **event}, ensure_ascii=False), file=sys.stderr, flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     # CLI help는 영어 우선 + 한국어 병기(round-21, 공개 대비).
     ap = argparse.ArgumentParser(prog="sipher")
@@ -209,6 +214,14 @@ def main(argv: list[str] | None = None) -> int:
         kwargs["js"] = {"auto": "auto", "true": True, "false": False}[args.js_mode]
     if args.web_timeout is not None:
         kwargs["timeout"] = args.web_timeout
+
+    # Threads adapter만 R42 progress callback을 받는다. 다른 adapter에 공통 kwarg를
+    # 흘려 TypeError를 내지 않도록 host 판별 후에만 넣는다.
+    try:
+        if detect_platform(args.url) == "threads":
+            kwargs["progress"] = _write_threads_progress
+    except ValueError:
+        pass
 
     try:
         result = fetch(

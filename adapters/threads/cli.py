@@ -24,7 +24,16 @@ from . import fetch
 _log = logging.getLogger(__name__)
 
 
+def _write_progress(event: dict) -> None:
+    """최종 JSON stdout 계약을 건드리지 않는 stderr JSONL progress sink."""
+    print(json.dumps({"type": "progress", **event}, ensure_ascii=False), file=sys.stderr, flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
+    # argparse가 --help를 출력하기 전에 UTF-8을 고정해야 Windows 기본 codepage에서도
+    # 한국어 도움말과 이후 stderr progress 관찰이 깨지지 않는다.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(prog="sipher-threads")
     ap.add_argument("-v", "--verbose", action="store_true", help="debug 로그")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -44,15 +53,10 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    # 본문/댓글에 비-BMP 문자(이모지 등)가 섞여도 stdout 출력이 콘솔 기본
-    # codepage(Windows cp949 등)에서 깨지지 않도록 UTF-8 고정.
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-
     try:
         result = fetch(
             args.url, media_dir=args.media_dir, deep=args.deep, auto=args.auto, all_comments=args.all_comments,
-            download=args.download, max_pages=args.max_pages,
+            download=args.download, max_pages=args.max_pages, progress=_write_progress,
         )
     except KeyboardInterrupt:
         print("\n중단됨", file=sys.stderr)

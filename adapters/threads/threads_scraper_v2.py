@@ -10,7 +10,7 @@ from parsel import Selector
 
 COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "threads_cookies.json")
 
-from .media_utils import extract_media, download_media, iter_thread_posts
+from .media_utils import extract_media, extract_text_blocks, text_from_blocks, download_media, iter_thread_posts
 
 
 def parse_post(post_data: Dict) -> Dict:
@@ -19,8 +19,8 @@ def parse_post(post_data: Dict) -> Dict:
         return None
 
     try:
-        caption = post_data.get("caption") or {}
-        text = caption.get("text")
+        text_blocks = extract_text_blocks(post_data)
+        text = text_from_blocks(text_blocks)
 
         user = post_data.get("user") or {}
         author = user.get("username")
@@ -36,6 +36,7 @@ def parse_post(post_data: Dict) -> Dict:
             "id": post_data.get("id"),
             "code": post_data.get("code"),
             "text": text,
+            "text_blocks": text_blocks,
             "author": author,
             "likes": post_data.get("like_count", 0),
             "reply_count": post_data.get("text_post_app_info", {}).get("direct_reply_count", 0),

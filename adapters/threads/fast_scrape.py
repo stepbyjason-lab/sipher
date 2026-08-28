@@ -11,7 +11,7 @@ away — the Threads CDN URLs are signed and expire within hours.
 import json, asyncio, sys, os
 from playwright.async_api import async_playwright
 from parsel import Selector
-from .media_utils import extract_media, download_media, iter_thread_posts
+from .media_utils import extract_media, extract_text_blocks, text_from_blocks, download_media, iter_thread_posts
 
 COOKIE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "threads_cookies.json")
 
@@ -20,8 +20,8 @@ def parse_post(p):
     if not isinstance(p, dict):
         return None
     try:
-        cap = p.get("caption") or {}
-        text = cap.get("text")
+        text_blocks = extract_text_blocks(p)
+        text = text_from_blocks(text_blocks)
         user = p.get("user") or {}
         author = user.get("username")
         images, videos = extract_media(p)
@@ -33,6 +33,7 @@ def parse_post(p):
             "id": p.get("id"),
             "code": p.get("code"),
             "text": text,
+            "text_blocks": text_blocks,
             "author": author,
             "likes": p.get("like_count", 0),
             "reply_count": p.get("text_post_app_info", {}).get("direct_reply_count", 0),
@@ -52,8 +53,23 @@ async def _launch_browser(pw, *, headless: bool = True):
         return await pw.chromium.launch(headless=headless)
 
 
-async def scrape(url, out, do_download=False):
+async def scrape(url, out, do_download=False, progress=None):
     found = {}
+
+    def emit(event, **fields):
+        if progress is None:
+            return
+        try:
+            progress(event, **fields)
+        except Exception:
+            # 진행 관찰자는 수집 결과의 성공/실패를 바꾸지 않는다.
+            pass
+
+    async def heartbeat():
+        while True:
+            await asyncio.sleep(5)
+            emit("fast_waiting", url=url)
+
     async with async_playwright() as pw:
         browser = await _launch_browser(pw, headless=True)
         ctx = await browser.new_context(locale="en-US")
@@ -74,6 +90,7 @@ async def scrape(url, out, do_download=False):
                     pass
         page.on("response", handle)
 
+        ticker = asyncio.create_task(heartbeat())
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=30000)
             await page.wait_for_timeout(4000)  # let graphql land
@@ -95,17 +112,32 @@ async def scrape(url, out, do_download=False):
                 await page.mouse.wheel(0, 3000)
                 await page.wait_for_timeout(1200)
         except Exception as ex:
-            sys.stderr.write(f"ERR {url}: {ex}\n")
-        await browser.close()
+            if progress is None:
+                sys.stderr.write(f"ERR {url}: {ex}\n")
+            else:
+                emit("fast_error", url=url, error_type=type(ex).__name__)
+        finally:
+            ticker.cancel()
+            try:
+                await ticker
+            except asyncio.CancelledError:
+                pass
+            await browser.close()
 
     posts = list(found.values())
     if do_download:
         count = download_media(posts, out_dir="downloads")
-        sys.stderr.write(f"Downloaded {count} media file(s) into ./downloads/\n")
+        if progress is None:
+            sys.stderr.write(f"Downloaded {count} media file(s) into ./downloads/\n")
+        else:
+            emit("media_download_complete", url=url, downloaded_count=count)
 
     with open(out, "w", encoding="utf-8") as f:
         json.dump(posts, f, indent=2, ensure_ascii=False)
-    sys.stderr.write(f"OK {out}: {len(posts)} posts\n")
+    if progress is None:
+        sys.stderr.write(f"OK {out}: {len(posts)} posts\n")
+    else:
+        emit("fast_scrape_complete", url=url, post_count=len(posts))
     return posts
 
 

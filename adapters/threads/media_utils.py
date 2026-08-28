@@ -102,6 +102,52 @@ def extract_media(post_data: Dict) -> Tuple[List[str], List[str]]:
     return images, videos
 
 
+def extract_text_blocks(post_data: Dict) -> List[Dict]:
+    """Threads post의 일반 본문과 rich-text attachment를 출처별로 보존한다.
+
+    Threads는 짧은 ``caption.text``와 별도로 ``text_post_app_info`` 안에
+    접힌 긴 텍스트 카드(snippet attachment)를 둔다. 화면의 "더 보기"는 이
+    원문을 접어 표시하는 UI일 뿐이므로, OCR로 다시 읽지 않고 JSON 원문을 쓴다.
+    같은 문자열이 caption과 일반 fragment에 중복될 때는 최초 출처만 남긴다.
+    """
+    if not isinstance(post_data, dict):
+        return []
+
+    blocks: List[Dict] = []
+    seen: set[str] = set()
+
+    def add(source: str, value) -> None:
+        if not isinstance(value, str) or not value or value in seen:
+            return
+        seen.add(value)
+        blocks.append({"source": source, "text": value})
+
+    caption = post_data.get("caption") or {}
+    add("caption", caption.get("text"))
+
+    info = post_data.get("text_post_app_info") or {}
+
+    def add_fragments(container, source: str) -> None:
+        fragments = (container or {}).get("fragments") or []
+        for fragment in fragments:
+            if isinstance(fragment, dict):
+                add(source, fragment.get("plaintext"))
+
+    add_fragments(info.get("text_fragments"), "text_fragment")
+    snippet = info.get("snippet_attachment_info") or {}
+    add_fragments(snippet.get("text_fragments"), "snippet_attachment")
+    return blocks
+
+
+def text_from_blocks(blocks: List[Dict]) -> str:
+    """하위 호환 ``text`` 값: 순서 보존한 고유 block을 빈 줄로 연결한다."""
+    return "\n\n".join(
+        block["text"]
+        for block in blocks
+        if isinstance(block, dict) and isinstance(block.get("text"), str) and block["text"]
+    )
+
+
 def _ext_from_url(url: str, default: str) -> str:
     """Best-effort file extension from a CDN URL path (ignores query string)."""
     path = url.split("?", 1)[0]
