@@ -363,6 +363,18 @@ def test_r42_threads_cli_progress_uses_stderr_without_breaking_json_stdout(monke
     assert all(line["type"] == "progress" for line in progress_lines)
 
 
+def test_r43_core_cli_help_explains_threads_progress_and_partial_contract(capsys):
+    import pytest
+    import core.__main__ as cli
+
+    with pytest.raises(SystemExit) as exited:
+        cli.main(["fetch", "--help"])
+    assert exited.value.code == 0
+    help_text = capsys.readouterr().out
+    for expected in ("stderr", "progress", "partial", "meta.author_thread.resolution.status", "partial_reason"):
+        assert expected in help_text
+
+
 # ── round-34 재게이트 P1: 전 플랫폼 × 공통옵션 × None/True/False 매트릭스 ───────
 # 1차 R34 테스트는 TikTok/YouTube 일부 조합만 커버해 다른 플랫폼의 번역·opt-out
 # 회귀를 못 잡았다(재게이트 실측). 실제 어댑터 시그니처에 바인딩되는지가 핵심 —

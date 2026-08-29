@@ -315,6 +315,15 @@ def fetch(url: str, *, media_dir: str | Path | None = None, deep: bool = False,
     - all_comments=True: fast pass에서도 타인 댓글을 제외하지 않고 수집한다.
     - download=True: media_dir(기본 "downloads")에 이미지/영상 다운로드. CDN URL은
       서명·시간제한이라 스크랩 직후 받지 않으면 만료된다(원본 media_utils.py docstring 근거).
+    - progress: 선택 callback. `share_resolved`, `fast_started`, `fast_waiting`,
+      `fast_complete`, `continuation_started`, `continuation_complete`,
+      `continuation_partial`, `collection_complete` event dict를 받는다. callback 예외는
+      수집 결과를 바꾸지 않고 무시한다.
+
+    root post를 찾은 뒤 continuation 시간 예산이 소진되면 예외 대신 현재 확보분을 반환한다.
+    이 정상 부분 결과는 `meta.author_thread.resolution.status == "partial"`이며,
+    `partial_reason`/`partial_reasons`, `unresolved_candidates`, `elapsed_ms`를 함께
+    확인한다. root post 자체를 찾지 못한 경우는 partial이 아니라 RuntimeError다.
 
     보안 경고(trusted input): media_dir/max_pages는 로컬 사용자가 지정하는 신뢰 입력이다.
     이 함수는 경로 containment를 하지 않는다 — youtube 어댑터와 동일한 경계 원칙.

@@ -2,7 +2,7 @@
 
 # Sipher
 
-> **Current public release: v0.1.2**
+> **Current public release: v0.1.3**
 
 **Throw any URL or file at it — get back clean, normalized content.**<br>
 **아무 URL이나 파일을 던지면 — 깨끗하게 정규화된 콘텐츠로 돌려줍니다.**
@@ -97,6 +97,17 @@ credit card.
 - `--transcribe` — transcribe audio/video. Local Whisper first; if it's missing or
   fails, **auto-falls back to free Groq Whisper** — a machine with no GPU can still
   transcribe with just a Groq key.
+
+### Threads progress and partial results
+
+Threads progress events are emitted as JSON Lines on **stderr**; stdout stays the final
+Markdown or JSON result. A result with
+`meta.author_thread.resolution.status == "partial"` is not a fetch failure: the root post
+and collected author follow-ups are valid, while `partial_reason` and
+`unresolved_candidates` explain what remained unresolved before the continuation time budget.
+
+Python callers can pass `progress=callback` to `core.fetch()` or
+`adapters.threads.fetch()` to receive the same lifecycle event dictionaries directly.
 
 ---
 

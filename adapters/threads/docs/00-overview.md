@@ -124,6 +124,11 @@ root에 대한 다른 사람의 답글·그 답글 아래의 대화는 기본 �
 `time_budget_seconds`, `time_budget_exhausted`가 함께 남는다. root post 자체를 못 찾으면
 부분 수집으로 위장하지 않고 기존처럼 `RuntimeError`/CLI exit 1이다.
 
+**호출자 소비 계약:** CLI는 progress를 stderr JSON Lines로 내고 stdout에는 최종 결과 하나만
+남긴다. library 호출자는 `fetch(progress=callback)`으로 같은 event dict를 받는다. 호출자는
+`resolution.status == "partial"`을 실패로 바꾸지 말고 root/author 결과를 소비한 뒤,
+`partial_reason`·`unresolved_candidates`로 미해소 범위를 표시한다.
+
 **root 포스트 미발견 시 실패 표면화:** `fetch()`는 `assessment.root_found`가 False면
 `RuntimeError`를 raise한다(스크랩 완전 실패가 exit 0 빈 dict로 위장되지 않는다). 원인은
 네트워크 오류, 쿠키 만료, 차단, 잘못된 URL 등일 수 있다. CLI는 이를 exit 1로 표면화한다.

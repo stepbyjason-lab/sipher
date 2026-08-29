@@ -2,7 +2,7 @@
 
 # Sipher
 
-> **현재 공개 버전: v0.1.2**
+> **현재 공개 버전: v0.1.3**
 
 **아무 URL이나 파일을 던지면 — 깨끗하게 정규화된 콘텐츠로 돌려줍니다.**
 
@@ -83,6 +83,16 @@ Sipher의 AI 보강은 **유료 키 없이 끝까지 돌아가도록** 설계됐
   NIM 키 없으면 Gemini 단독으로 degrade.
 - `--transcribe` — 음성/영상 전사. 로컬 Whisper 우선, 없거나 실패하면 **무료 Groq
   Whisper로 자동 폴백** — GPU 없는 머신도 Groq 키 하나로 전사 가능.
+
+### Threads 진행 상태와 partial 결과
+
+Threads 진행 event는 **stderr** JSON Lines로 나오고 stdout에는 최종 Markdown 또는 JSON만
+나옵니다. `meta.author_thread.resolution.status == "partial"`은 수집 실패가 아닙니다.
+root와 확보된 원글 작성자 후속글은 유효하며, continuation 시간 예산 안에 해소되지 않은 범위는
+`partial_reason`과 `unresolved_candidates`로 확인합니다.
+
+Python 호출자는 `core.fetch()` 또는 `adapters.threads.fetch()`에 `progress=callback`을 넘겨
+같은 lifecycle event dict를 직접 받을 수 있습니다.
 
 ---
 

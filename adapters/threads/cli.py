@@ -11,6 +11,11 @@ fetch : 단일 Threads 포스트 URL → 정규화 JSON(stdout)
   --auto            fast pass가 불완전해 보이면 자동으로 deep 크롤 승격
   --download        이미지/영상을 media_dir에 다운로드(CDN URL 서명 만료 전에)
   --max-pages N     deep 크롤 최대 페이지 수(기본 100)
+
+progress / partial:
+  progress event는 stderr JSON Lines로 나오며 stdout은 최종 JSON 하나만 출력한다.
+  partial은 root post 수집 후 author continuation 일부가 시간 예산 안에 해소되지 않은 정상 결과다.
+  meta.author_thread.resolution.status와 partial_reason을 확인한다.
 """
 from __future__ import annotations
 
@@ -38,7 +43,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("-v", "--verbose", action="store_true", help="debug 로그")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    pf = sub.add_parser("fetch", help="단일 포스트 URL → 정규화 JSON")
+    pf = sub.add_parser(
+        "fetch", help="단일 포스트 URL → 정규화 JSON",
+        description=(
+            "Progress events are JSON Lines on stderr; stdout remains one final JSON result. "
+            "partial means the root post was collected but one or more author continuations were "
+            "unresolved before the time budget. Inspect meta.author_thread.resolution.status and partial_reason "
+            "(progress는 stderr JSON Lines, stdout은 최종 JSON 하나. partial은 root 수집 후 "
+            "continuation 일부가 시간 예산 안에 해소되지 않은 정상 결과)."
+        ))
     pf.add_argument("url")
     pf.add_argument("--media-dir", default=None, help="다운로드 대상 디렉토리(기본 downloads)")
     pf.add_argument("--deep", action="store_true", help="fast pass 생략, 재귀 크롤부터")

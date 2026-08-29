@@ -316,6 +316,24 @@ def test_adapter_cli_progress_uses_stderr_without_breaking_json_stdout(monkeypat
     assert all(line["type"] == "progress" for line in progress_lines)
 
 
+def test_adapter_cli_help_explains_progress_and_partial_contract(capsys):
+    import pytest
+    from adapters.threads import cli
+
+    with pytest.raises(SystemExit) as exited:
+        cli.main(["fetch", "--help"])
+    assert exited.value.code == 0
+    help_text = capsys.readouterr().out
+    for expected in ("stderr", "progress", "partial", "meta.author_thread.resolution.status", "partial_reason"):
+        assert expected in help_text
+
+
+def test_public_fetch_docstring_explains_callback_and_partial_contract():
+    doc = threads.fetch.__doc__ or ""
+    for expected in ("progress", "callback", "callback 예외", 'status == "partial"', "partial_reason", "RuntimeError"):
+        assert expected in doc
+
+
 def test_r42_handoff_indexes_record_completed_rounds_and_unnumbered_ocr_backlog():
     from pathlib import Path
 
@@ -329,3 +347,16 @@ def test_r42_handoff_indexes_record_completed_rounds_and_unnumbered_ocr_backlog(
     assert "### R41 — 프리미엄 벤더 OCR judge 벤치마크·선정" not in roadmap
     assert "round-42-threads-continuation-time-budget-plan-lite.md" in latest
     assert "R42 완료" in latest
+
+
+def test_r43_public_docs_explain_threads_partial_consumption():
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[3]
+    readme_en = (repo_root / "README.md").read_text(encoding="utf-8")
+    readme_ko = (repo_root / "README.ko.md").read_text(encoding="utf-8")
+    overview = (repo_root / "adapters" / "threads" / "docs" / "00-overview.md").read_text(encoding="utf-8")
+    for text in (readme_en, readme_ko, overview):
+        assert "meta.author_thread.resolution.status" in text
+        assert "partial_reason" in text
+        assert "stderr" in text

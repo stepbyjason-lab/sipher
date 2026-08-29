@@ -47,6 +47,11 @@ web 옵션 (범용 폴백, 6플랫폼 host 미매칭 http(s) URL 대상 — roun
                           true(항상 JS 렌더 강제)/false(정적 tier1만)
   --timeout N             tier1 요청 타임아웃 초(기본 25)
 
+Threads progress / partial 결과:
+  Threads progress event는 stderr JSON Lines로 나오며 stdout에는 최종 결과만 나온다.
+  root post를 확보한 뒤 continuation 시간이 끝난 `partial`은 수집 실패가 아니다.
+  호출자는 meta.author_thread.resolution.status와 partial_reason을 확인한다.
+
 플랫폼 전용 옵션 전체는 각 어댑터 CLI 참조(python -m adapters.<platform>.cli).
 """
 from __future__ import annotations
@@ -79,7 +84,15 @@ def main(argv: list[str] | None = None) -> int:
     pf = sub.add_parser(
         "fetch",
         help="URL/local file → human Markdown (default) or JSON; platform auto-detected "
-             "(URL/로컬파일 → 사람용 Markdown(기본) 또는 JSON, 플랫폼 자동 판별)")
+             "(URL/로컬파일 → 사람용 Markdown(기본) 또는 JSON, 플랫폼 자동 판별)",
+        description=(
+            "Threads progress is written as JSON Lines to stderr; stdout remains the final result. "
+            "A Threads partial result means the root post was collected but one or more author "
+            "continuations were unresolved before the time budget. Read "
+            "meta.author_thread.resolution.status and partial_reason "
+            "(Threads 진행 event는 stderr JSON Lines, stdout은 최종 결과만 출력. partial은 root 수집 후 "
+            "continuation 일부가 시간 예산 안에 해소되지 않은 정상 결과이며 resolution.status/partial_reason을 확인)."
+        ))
     pf.add_argument("url", help="URL or local file path (URL 또는 로컬 파일 경로)")
     pf.add_argument("--json", action="store_true", dest="json_output",
                      help="print normalized JSON to stdout (정규화 JSON을 stdout에 출력)")
