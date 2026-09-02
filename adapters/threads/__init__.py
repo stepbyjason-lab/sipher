@@ -15,6 +15,7 @@ Threads의 고유값은 **중첩 댓글**이다 — naver_blog/facebook과 달�
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import time
@@ -450,6 +451,50 @@ def _item_shape(p: dict) -> dict:
     }
 
 
+def _taken_at_value(post: dict) -> float | None:
+    """raw `taken_at`을 정렬 가능한 수치로, 판정 불가면 None(=시각 미상).
+
+    Threads 응답의 `taken_at`은 Unix epoch 초 정수지만, 응답 스키마 변화나
+    파서 실패로 없거나 다른 타입일 수 있다. 그런 값은 예외를 올리지 않고
+    None으로 떨어뜨려 수집 자체를 깨지 않는다.
+    """
+    raw = post.get("taken_at")
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, (int, float)):
+        try:
+            value = float(raw)
+        except OverflowError:                     # float 범위를 넘는 임의정밀 int
+            return None
+    elif isinstance(raw, str):
+        try:
+            value = float(raw.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return value if math.isfinite(value) else None      # NaN·±무한 배제
+
+
+def _ordered_by_taken_at(posts: list[dict]) -> list[dict]:
+    """원저자 연속글을 원문 게시 시각 오름차순으로 되돌린다(R43-H1).
+
+    fast 수집은 GraphQL/HTML 응답 도착 순서로 포스트를 발견하고 continuation은
+    나중에 찾은 포스트를 목록 끝에 append하므로, 입력 순서는 화면의 시간 흐름과
+    다를 수 있다. `taken_at`을 아는 항목끼리만 시간순으로 재배치하고, 시각을
+    모르는 항목은 발견 순서 그대로 원래 자리에 남긴다 — 동률은 stable sort가
+    발견 순서를 보존한다. 시각 미상 항목에 대해 "언제 게시됐다"를 추측하지 않는다.
+    """
+    known = [(i, p) for i, p in enumerate(posts) if _taken_at_value(p) is not None]
+    if len(known) < 2:
+        return list(posts)
+    ordered = sorted((p for _, p in known), key=_taken_at_value)
+    result = list(posts)
+    for (index, _), post in zip(known, ordered):
+        result[index] = post
+    return result
+
+
 def normalize(posts: list[dict], *, source: str, author: str, code: str,
               assessment: dict | None = None, downloaded: bool = False,
               deep: bool = False, max_pages: int | None = None,
@@ -462,8 +507,11 @@ def normalize(posts: list[dict], *, source: str, author: str, code: str,
 
     [Round A] non-root 중 author가 root author와 같은 포스트는 Threads 특유의
     "저자 본인이 자기 글을 이어 쓰는 연속 포스트" 문화를 반영해 `author_thread[]`로
-    분리한다 — comments[]에는 실제 타인 댓글만 남긴다. 분류 순서 원본(posts) 순서를
-    보존한다(재정렬하지 않음).
+    분리한다 — comments[]에는 실제 타인 댓글만 남긴다.
+
+    [R43-H1] `author_thread[]`는 원저자가 실제로 게시한 시각(raw `taken_at`)
+    오름차순으로 반환한다. 시각이 같거나 미상인 항목은 입력 발견 순서를 그대로
+    유지한다. `comments[]`는 종전대로 입력 순서를 보존한다(재정렬하지 않음).
 
     알려진 한계(silent 아님): author == root_author 규칙은 "자기 연속글"과
     "저자 본인이 타인 댓글에 남긴 답글"을 구분하지 못한다 — vendored
@@ -497,6 +545,10 @@ def normalize(posts: list[dict], *, source: str, author: str, code: str,
     all_media_paths = []
     for p in posts:
         all_media_paths.extend(p.get("downloaded") or [])
+
+    # 출력 정규화 직전에 원저자 연속글만 원문 시간순으로 되돌린다 — comments[]는
+    # 손대지 않는다(parent/reply-target이 없어 대화 트리를 복원할 수 없음).
+    author_thread_posts = _ordered_by_taken_at(author_thread_posts)
 
     comments = [_item_shape(p) for p in comment_posts]
     author_thread = [_item_shape(p) for p in author_thread_posts]

@@ -56,11 +56,11 @@ def test_snippet_only_post_is_not_dropped_when_caption_is_empty():
     assert post["text_blocks"] == [{"source": "snippet_attachment", "text": "full prompt"}]
 
 
-def _post(*, code, author="alice", text="", replies=0, blocks=None):
+def _post(*, code, author="alice", text="", replies=0, blocks=None, taken_at=None):
     return {
         "id": f"id-{code}", "code": code, "author": author, "text": text,
         "text_blocks": list(blocks or []), "likes": 0, "reply_count": replies,
-        "images": [], "videos": [],
+        "images": [], "videos": [], "taken_at": taken_at,
     }
 
 
@@ -103,6 +103,31 @@ def test_default_author_only_resolves_author_followup_without_deep_or_other_auth
     assert resolution["mode"] == "fast_author_continuation"
     assert resolution["attempted_pages"] == 1
     assert resolution["discovered_posts"] == 1
+
+
+def test_continuation_merge_returns_author_thread_in_source_time_order():
+    """R43-H1: continuation이 뒤늦게 merge한 더 이른 글도 원문 시간순 자리로 간다."""
+    root = _post(code="ROOT", text="root", replies=20, taken_at=1000)
+    v1 = _post(code="V1", text="V1", replies=1, taken_at=1100)
+    v4 = _post(code="V4", text="V4", taken_at=1400)
+    # fast pass는 V1/V4만 보고, V1 재조회에서 그보다 늦게 V2/V3가 발견된다.
+    v2 = _post(code="V2", text="V2", taken_at=1200)
+    v3 = _post(code="V3", text="V3", taken_at=1300)
+
+    def fake_run(url, *, deep, auto, max_pages, **_kwargs):
+        if url.endswith("/ROOT"):
+            return [root, v1, v4], False
+        if url.endswith("/V1"):
+            return [v1, v3, v2], False
+        raise AssertionError(f"unexpected continuation URL: {url}")
+
+    assessment = {"root_found": True, "expected": 2, "captured": 2, "incomplete": False}
+    with patch.object(threads, "_run_scrape", side_effect=fake_run),          patch("adapters.threads.scrape.assess", return_value=assessment):
+        result = threads.fetch("https://www.threads.net/@alice/post/ROOT")
+
+    codes = [post["code"] for post in result["author_thread"]]
+    assert codes == ["V1", "V2", "V3", "V4"]
+    assert result["meta"]["author_thread"]["codes"] == codes
 
 
 def test_explicit_collection_mode_does_not_run_author_continuation_resolver():
@@ -334,7 +359,13 @@ def test_public_fetch_docstring_explains_callback_and_partial_contract():
         assert expected in doc
 
 
-def test_r42_handoff_indexes_record_completed_rounds_and_unnumbered_ocr_backlog():
+def test_threads_handoff_indexes_record_completed_rounds_and_unnumbered_ocr_backlog():
+    """완료된 R43/R43-H1 이력과 기존 R42 LATEST 포인터를 각각 보존한다.
+
+    `마지막 완료 라운드`는 이후 라운드가 완료될 때마다 바뀌는 현재 상태이므로 여기서
+    고정하지 않는다. `LATEST.md`는 아직 R42 기획서를 가리키므로 해당 표기는 그대로
+    검증한다.
+    """
     from pathlib import Path
 
     repo_root = Path(__file__).resolve().parents[3]
@@ -342,7 +373,8 @@ def test_r42_handoff_indexes_record_completed_rounds_and_unnumbered_ocr_backlog(
     latest = (repo_root / ".handoff" / "rounds" / "LATEST.md").read_text(encoding="utf-8")
 
     assert "R40-H2" in roadmap
-    assert "마지막 완료 라운드: **R42**" in roadmap
+    assert "## ✅ R43 완료" in roadmap
+    assert "## ✅ R43-H1 완료" in roadmap
     assert "### 조건부·미번호 백로그 — 프리미엄 벤더 OCR judge 벤치마크·선정" in roadmap
     assert "### R41 — 프리미엄 벤더 OCR judge 벤치마크·선정" not in roadmap
     assert "round-42-threads-continuation-time-budget-plan-lite.md" in latest

@@ -67,7 +67,7 @@ Sipher의 AI 보강은 **유료 키 없이 끝까지 돌아가도록** 설계됐
 
 | 소스 | 얻는 것 |
 |---|---|
-| **Threads** | 본문·원글 작성자 후속글·접힌 rich-text 카드를 기본 수집. continuation은 stderr progress를 내며 45초 예산 뒤에도 확보분을 정직한 `partial` 결과로 반환. 타인 댓글은 `--all-comments`, 조건부 deep 크롤은 `--auto`, 전체 reply tree는 `--deep`으로 명시. |
+| **Threads** | 본문·원글 작성자 후속글·접힌 rich-text 카드를 기본 수집. 원글 작성자 후속글은 출처 시각이 있을 때 작성자의 실제 게시 시간순으로 반환. continuation은 stderr progress를 내며 45초 예산 뒤에도 확보분을 정직한 `partial` 결과로 반환. 타인 댓글은 `--all-comments`, 조건부 deep 크롤은 `--auto`, 전체 reply tree는 `--deep`으로 명시. |
 | **YouTube** | 설명·메타·미디어, `--from-start`(라이브 처음부터), 라이브 채팅 replay, (옵션) 자막·댓글. |
 | **Facebook** | 본문, **풀사이즈 사진**(라이트박스 우회 + 숨은 `+N`장), 영상, **댓글 본문**(정직한 신뢰도 라벨). |
 | **Instagram** | 캡션·미디어·메타. 로그인 세션 필요(익명 접근 차단) — access 라벨로 정직 보고. |
@@ -93,6 +93,12 @@ root와 확보된 원글 작성자 후속글은 유효하며, continuation 시�
 
 Python 호출자는 `core.fetch()` 또는 `adapters.threads.fetch()`에 `progress=callback`을 넘겨
 같은 lifecycle event dict를 직접 받을 수 있습니다.
+
+### Threads 원글 작성자 후속글 순서
+
+`author_thread[]`는 GraphQL·continuation 요청에서 글을 발견한 순서가 아니라 원글 작성자의 게시
+시각순으로 반환됩니다. 두 글의 출처 시각이 같거나 시각을 알 수 없으면 기존 발견 순서를 유지합니다.
+이 정책은 전체 중첩 reply tree를 재구성하지 않으며, `comments[]`에는 정렬을 적용하지 않습니다.
 
 ---
 

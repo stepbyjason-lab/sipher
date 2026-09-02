@@ -2,7 +2,7 @@
 
 # Sipher
 
-> **Current public release: v0.1.3**
+> **Current public release: v0.1.4**
 
 **Throw any URL or file at it — get back clean, normalized content.**<br>
 **아무 URL이나 파일을 던지면 — 깨끗하게 정규화된 콘텐츠로 돌려줍니다.**
@@ -79,7 +79,7 @@ credit card.
 
 | Source | What you get |
 |---|---|
-| **Threads** | Post body plus root-author follow-ups and full rich-text cards by default. Continuation resolution reports stderr progress and returns an honest `partial` result after its 45-second budget; use `--all-comments` for visible replies, `--auto` for conditional deep crawl, or `--deep` for the full reply tree. |
+| **Threads** | Post body plus root-author follow-ups and full rich-text cards by default. Root-author follow-ups are returned in the author's posting-time order when source timestamps are available. Continuation resolution reports stderr progress and returns an honest `partial` result after its 45-second budget; use `--all-comments` for visible replies, `--auto` for conditional deep crawl, or `--deep` for the full reply tree. |
 | **YouTube** | Description, metadata, media, `--from-start` (live from the beginning), live-chat replay, optional transcript & comments. |
 | **Facebook** | Body, **full-size photos** (lightbox bypass + hidden `+N` shots), video, and **comment bodies** with honest confidence labels. |
 | **Instagram** | Caption, media, metadata. Login session required (Instagram blocks anonymous access) — reported honestly via access labels. |
@@ -108,6 +108,14 @@ and collected author follow-ups are valid, while `partial_reason` and
 
 Python callers can pass `progress=callback` to `core.fetch()` or
 `adapters.threads.fetch()` to receive the same lifecycle event dictionaries directly.
+
+### Threads root-author order
+
+`author_thread[]` preserves the root author's posting-time order rather than the order in
+which GraphQL or continuation requests discovered the posts. If two posts have the same
+source time, or a source time is unavailable, their original discovery order is retained.
+This ordering does not reconstruct the full nested reply tree; `comments[]` remains
+unsorted.
 
 ---
 

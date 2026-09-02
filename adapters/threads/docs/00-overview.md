@@ -36,6 +36,12 @@ Threads의 고유값은 **중첩 댓글**이다. naver_blog(댓글 API 범위 �
   원저자 continuation의 상태 event를 callback으로 보낸다. adapter/core CLI는 event를
   stderr JSON Lines로 내고 stdout에는 최종 JSON만 남긴다. 기본 continuation은 45초
   wall-clock 예산을 넘기면 root와 확보된 원저자 결과를 `partial` 상태로 반환한다.
+- **author_thread[]는 원문 게시 시각순이다.** fast 수집은 GraphQL/HTML 응답 도착 순서로
+  포스트를 발견하고 continuation은 나중에 찾은 글을 뒤에 덧붙이므로, 발견 순서는 화면의
+  연속글 흐름과 다를 수 있다. 그래서 출력 직전에 원저자 연속글만 raw `taken_at` 오름차순으로
+  되돌린다. 시각이 같거나 없는 글은 발견 순서를 그대로 유지하며(시각을 추측하지 않는다),
+  이 정렬은 `author_thread[]`에만 적용된다 — `body_text`(root)와 `comments[]`는 손대지 않는다.
+  전체 reply tree의 대화 순서를 복원하는 것이 아니다(아래 항목의 parent/reply-target 부재 한계).
 - **comments[]는 flat list, 순서·트리 구조 비보존.** vendored 스크래퍼는 결과를
   `{id: post}` map으로 수집한다(원본이 이미 dict 병합 방식) — 중첩 depth/parent-child
   관계 자체는 원본 스키마에 없다. root(`code` 일치)를 body_text로 분리하고 나머지를
@@ -117,6 +123,9 @@ root에 대한 다른 사람의 답글·그 답글 아래의 대화는 기본 �
 `text_fragment`, `snippet_attachment` 중 하나다. `meta.author_thread.resolution`은
 기본 원저자 후속글 해소의 시도 페이지 수·발견 수·상한 소진 여부·실패한 post code를 기록하며, 이것이
 원저자 thread 전체의 완전 수집을 뜻하지는 않는다.
+
+`author_thread[]`는 원저자 게시 시각 오름차순이며 `meta.author_thread.codes`도 같은 순서다.
+정렬 근거인 `taken_at`은 공개 스키마에 노출하지 않는다(내부 정렬 정책).
 
 `meta.author_thread.resolution.status`는 `complete`(정책 범위의 후보 해소 완료),
 `partial`(시간·페이지·hop 상한 또는 child 실패로 일부 후보 미해소), `not_run`(명시 수집
