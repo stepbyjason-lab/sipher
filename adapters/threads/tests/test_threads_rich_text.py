@@ -360,17 +360,19 @@ def test_public_fetch_docstring_explains_callback_and_partial_contract():
 
 
 def test_threads_handoff_indexes_record_completed_rounds_and_unnumbered_ocr_backlog():
-    """완료된 R43/R43-H1 이력과 기존 R42 LATEST 포인터를 각각 보존한다.
+    """개발 소스 트리에서만 내부 handoff 이력의 정합을 검증한다.
 
-    `마지막 완료 라운드`는 이후 라운드가 완료될 때마다 바뀌는 현재 상태이므로 여기서
-    고정하지 않는다. `LATEST.md`는 아직 R42 기획서를 가리키므로 해당 표기는 그대로
-    검증한다.
+    공개 tarball은 `.handoff/`를 의도적으로 export-ignore하므로, 공개 배포판의
+    Threads 테스트가 내부 운영 문서를 필수로 읽으면 안 된다.
     """
     from pathlib import Path
 
     repo_root = Path(__file__).resolve().parents[3]
-    roadmap = (repo_root / ".handoff" / "ROADMAP.md").read_text(encoding="utf-8")
-    latest = (repo_root / ".handoff" / "rounds" / "LATEST.md").read_text(encoding="utf-8")
+    handoff_root = repo_root / ".handoff"
+    if not handoff_root.is_dir():
+        return
+    roadmap = (handoff_root / "ROADMAP.md").read_text(encoding="utf-8")
+    latest = (handoff_root / "rounds" / "LATEST.md").read_text(encoding="utf-8")
 
     assert "R40-H2" in roadmap
     assert "## ✅ R43 완료" in roadmap
