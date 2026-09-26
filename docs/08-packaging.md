@@ -25,7 +25,7 @@
 
 | 어댑터 | 서드파티 의존성 | 개인 로그인 세션 | 프로필 |
 |---|---|---|---|
-| core | markitdown(옵션), **requests**(필수 — llm_free OCR) | — | 공통 |
+| core | markitdown(옵션), **requests**(필수 — llm_free/ocr_ensemble OCR) | — | 공통 |
 | naver_blog | 없음(순수 stdlib `urllib`, requirements.txt 파일 자체가 없음) | 불필요 | LITE |
 | youtube | yt-dlp(필수) + 옵션 transcript/comments API, ffmpeg(시스템) | 불필요 | LITE |
 | tiktok | gallery-dl(subprocess 호출) | 불필요 | LITE |
@@ -67,9 +67,11 @@ scripts/setup.ps1 [-Profile lite|full] [-Browsers]
 
 | 항목 | 용도 | 필수 여부 |
 |---|---|---|
-| `GEMINI_API_KEY` | 무료비전 OCR(`core/llm_free.py`) | `--ocr` 옵션 사용 시 |
-| `NVIDIA_NIM_API_KEY` | OCR 앙상블(round-24) 후보/judge용 무료 provider. https://build.nvidia.com (카드 불필요). 없으면 Gemini 단독 degrade. **OCR 신뢰성 백업은 멀티계정이 아니라 이 멀티-provider 앙상블로** — 각 provider 약관 내 | 선택(앙상블) |
-| `GROQ_API_KEY` | 무료 전사 폴백(round-27, `core/transcribe.py`). local whisper가 없거나 개별 아이템에서 실패했을 때만 사용 — `whisper-large-v3-turbo`→`whisper-large-v3`(429 시) 순. https://console.groq.com (카드 불필요). **단일 키** 안에서 Groq가 제공한 모델별 무료 버킷만 사용(ToS 내, 멀티계정/멀티키 우회 아님) | 선택(local 없을 때 대체) |
+| `GEMINI_API_KEY` | `OCR_CANDIDATES`/`OCR_JUDGES`의 `google:` 항목(무료비전 OCR, `core/llm_free.py`)이 쓰는 키 | `--ocr` 옵션 사용 시 |
+| `NVIDIA_NIM_API_KEY` | `OCR_CANDIDATES`/`OCR_JUDGES`의 `nim:` 항목이 쓰는 키. https://build.nvidia.com (카드 불필요). 없으면 해당 항목은 건너뛰고 로스터의 다음 순위로 넘어간다 | 선택(로스터에 `nim:` 항목이 있을 때) |
+| `OCR_CANDIDATES` | writer 로스터 — `provider:model` 콤마 목록, 왼쪽이 1순위. 비어 있으면 writer를 아예 호출하지 않는다(`.env.example` 참조) | `--ocr` 옵션 사용 시 |
+| `OCR_JUDGES` | judge 로스터 — 형식은 `OCR_CANDIDATES`와 동일. 살아 있는 첫 judge가 이미지를 직접 보며 후보를 교정 | `--ocr` 옵션 사용 시 |
+| `GROQ_API_KEY` | 무료 전사 폴백(round-27, `core/transcribe.py`). local whisper가 없거나 개별 아이템에서 실패했을 때만 사용 — `whisper-large-v3-turbo`→`whisper-large-v3`(429 시) 순. https://console.groq.com (카드 불필요). **단일 키** 안에서 Groq가 제공한 모델별 무료 버킷만 사용 | 선택(local 없을 때 대체) |
 | threads 로그인 세션 | deep 크롤 시 안정성 향상 | 권장(FULL) |
 | facebook 로그인 세션(persistent context/cookies) | 인증 콘텐츠 접근 | 필수(FULL) |
 | instagram 로그인 세션 | 익명 접근이 거의 항상 403 | 사실상 필수(FULL) |
@@ -84,7 +86,7 @@ scripts/setup.ps1 [-Profile lite|full] [-Browsers]
 | 기능 | 도구 없을 때 라벨 | 코드 위치 |
 |---|---|---|
 | 로컬 문서 변환(pdf/docx 등) | `meta.conversion_label = "skipped_no_tool"` | `core/local.py`, `core/markitdown_local.py` |
-| 무료비전 OCR | `meta.ocr_label`(provider 키 없으면 미호출) | `core/normalize.py` |
+| 무료비전 OCR | `meta.ocr_label`(`OCR_CANDIDATES` 로스터에 살아있는 writer가 없으면 `skipped_no_provider`) | `core/normalize.py`, `core/ocr_ensemble.py` |
 | 전사(local whisper → Groq 폴백, round-27) | `meta.transcript_label = "skipped_no_tool"`(둘 다 없음) — 있으면 `meta.transcript_backend`에 `"local"`/`"groq"` 표기 | `core/normalize.py`, `core/transcribe.py` |
 | facebook 풀사이즈 이미지 회수 | `meta.fullsize_label` | `adapters/facebook/__init__.py` |
 | instagram 접근 실패 | `InstagramAccessError.access_label`(예: `"anonymous_blocked"`) | `adapters/instagram/__init__.py` |

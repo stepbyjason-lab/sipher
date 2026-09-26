@@ -3,8 +3,8 @@ sipher 무료 비전 API 클라이언트 — Gemini OCR.
 
 `docs/01-overview.md` §8 PoC(2026-07-01, `scratchpad/ocr_poc.py`)에서 무료 비전
 5종(Gemini·Cloudflare·NIM·Mistral·OpenRouter) 중 당시 **Gemini 2.5 Flash가 1위**로
-확정됐다(무환각, 한국어 카드뉴스 ~95%+ 정확도). 현재 기본 모델은 Google의 안정
-멀티모달 후속 모델인 Gemini 3.6 Flash다. 이 모듈은 그 PoC 패턴을
+확정됐다(무환각, 한국어 카드뉴스 ~95%+ 정확도). 호출 모델은 상위 OCR 로스터가
+설정에서 골라 명시한다. 이 모듈은 그 PoC 패턴을
 core 레이어용으로 재작성·하드닝한 것이다 — PoC 스크립트를 그대로 import하지
 않는다(1회성 실험 스크립트라 계약 표면이 없음).
 
@@ -32,7 +32,6 @@ __all__ = ["ocr_image", "is_available", "OcrError"]
 _log = logging.getLogger(__name__)
 
 _ROOT = Path(__file__).resolve().parent.parent
-_DEFAULT_MODEL = "gemini-3.6-flash"
 _TIMEOUT_SECONDS = 60
 _MAX_RETRIES = 2
 _RETRY_DELAY_SECONDS = 3
@@ -80,8 +79,21 @@ def _load_env_file(path: Path) -> dict[str, str]:
     return env
 
 
+def _first_google_model(raw: str) -> str:
+    """`provider:model` roster에서 첫 Google 모델을 반환한다."""
+    for item in raw.split(","):
+        provider, separator, model = item.strip().partition(":")
+        if separator and provider.strip().lower() == "google" and model.strip():
+            return model.strip()
+    return ""
+
+
 def _config() -> tuple[str | None, str]:
     """(api_key, model). `.env.local` → os.environ 순으로 단일 `GEMINI_API_KEY` 조회.
+
+    `model`은 같은 순서로 읽은 `OCR_CANDIDATES`의 첫 Google 항목이며, 로스터에
+    Google 항목이 없으면 **빈 문자열**이다 — 코드 기본값도, 다른 파일에서 빌려온
+    값도 만들지 않는다(round-44: 설정에 없는 모델은 부르지 않는다).
 
     ※ 멀티계정 무료한도 우회는 provider ToS 위반이라 지원하지 않는다 — 키는 1개만.
     """
@@ -89,7 +101,8 @@ def _config() -> tuple[str | None, str]:
 
     env = _load_env_file(_ROOT / ".env.local")
     key = env.get("GEMINI_API_KEY") or os.environ.get("GEMINI_API_KEY")
-    model = env.get("GEMINI_MODEL") or os.environ.get("GEMINI_MODEL") or _DEFAULT_MODEL
+    roster = env.get("OCR_CANDIDATES") or os.environ.get("OCR_CANDIDATES", "")
+    model = _first_google_model(roster)
     return key, model
 
 
@@ -295,8 +308,26 @@ def _call_gemini(image_path: Path, *, api_key: str, model: str,
                     ) from e
                 try:
                     candidate = data["candidates"][0]
-                    text = candidate["content"]["parts"][0]["text"]
-                except (KeyError, IndexError, TypeError) as e:
+                    parts = candidate["content"]["parts"]
+                    if not parts:
+                        raise IndexError("candidates[0].content.parts 가 비어 있다")
+                    # round-44: 생각 채널을 쓰는 모델(gemma-4 계열)은 추론을 `thought:
+                    # true` 조각으로 **먼저** 보내고 답은 그다음 조각에 담는다 —
+                    # 2026-09-17 실측: parts=2, part[0](thought=True) 1,643자 추론,
+                    # part[1] 48자 최종 답. `parts[0]`만 읽으면 추론을 OCR 결과로
+                    # 반환해 배경 텍스트와 사고 뼈대가 그대로 섞여 나온다(라이브
+                    # 관측에서 judge 7회 중 6회 오염). 답 조각만 모은다 — 조각이
+                    # 하나뿐인 기존 모델은 그 하나가 그대로 답이라 동작이 안 바뀐다.
+                    # 생각 조각만 오면 빈 문자열이 되고, 공용 빈 응답 관문
+                    # (`ocr_ensemble._looks_empty`)이 사다리를 내려가게 한다.
+                    text = "".join(
+                        part.get("text", "") for part in parts if not part.get("thought"))
+                # round-44 리뷰: `AttributeError`가 빠져 있었다 — parts 원소가 dict가
+                # 아니면 `part.get`이 그 예외를 내고, 그러면 이 블록의 목적("응답이
+                # 어떤 형식이든 OcrError로 정규화")이 그 형태에서만 뚫린다. 조각을
+                # 순회하기 전에는 `parts[0]["text"]`가 같은 형태에서 TypeError를 내
+                # 잡혔다. 타입 불일치 계열을 전부 잡아 계약을 원래대로 돌린다.
+                except (KeyError, IndexError, TypeError, AttributeError) as e:
                     raise OcrError(f"Gemini 응답 형식 이상: {e}") from e
                 # round-36 F4: finishReason="MAX_TOKENS"면 절단(truncated) — 필드 부재는
                 # False(정상 완료)로 간주한다(오분류 금지, 계약 §절단 판정 기준).
@@ -311,7 +342,8 @@ def _call_gemini(image_path: Path, *, api_key: str, model: str,
     ) from last_err
 
 
-def ocr_image(path: str | Path, *, prompt: str | None = None) -> dict:
+def ocr_image(path: str | Path, *, prompt: str | None = None,
+              model: str | None = None) -> dict:
     """이미지 파일 → `{"text": str, "model": str, "truncated": bool}`.
 
     `truncated`(round-36 F4)는 `finishReason == "MAX_TOKENS"`로 응답이 잘렸는지
@@ -321,6 +353,10 @@ def ocr_image(path: str | Path, *, prompt: str | None = None) -> dict:
     `prompt` 지정 시 기본 OCR 프롬프트 대신 사용(앙상블 judge가 이 통로로 재사용 —
     기본 None이면 기존 동작과 동일).
 
+    `model` 지정 시 설정 로스터가 고른 모델을 그대로 사용한다. 생략한 기존 단독
+    호출은 `.env.local`의 `OCR_CANDIDATES`에서 첫 Google 항목을 쓰고, 거기에 없으면
+    기본값을 지어내지 않고 `OcrError`로 실패한다(round-44).
+
     단일 `GEMINI_API_KEY`만 쓴다(멀티계정 우회 없음). quota 소진 시 `_QuotaExhausted`를
     던져 앙상블이 다른 provider로 사다리를 내려가게 한다. provider(키) 없으면 `OcrError`
     — 호출자가 `is_available()`로 먼저 확인해 degrade하는 것을 전제로 한다. 파일 부재도 `OcrError`.
@@ -329,12 +365,19 @@ def ocr_image(path: str | Path, *, prompt: str | None = None) -> dict:
     if not image_path.exists():
         raise OcrError(f"이미지 파일이 없습니다: {image_path}")
 
-    api_key, model = _config()
+    api_key, configured_model = _config()
     if not api_key:
         raise OcrError("GEMINI_API_KEY가 설정되지 않았습니다")
+    selected_model = model if model is not None else configured_model
+    if not selected_model:
+        raise OcrError(
+            "OCR 모델이 설정되지 않았습니다 — `.env.local`의 `OCR_CANDIDATES`에 "
+            "`google:<model>` 항목을 넣으세요(코드 기본값 없음)")
 
     # quota 소진(429/RESOURCE_EXHAUSTED)은 _call_gemini가 _QuotaExhausted로 던진다 —
     # 여기서 잡지 않고 그대로 전파해 앙상블이 provider dead 마킹하게 한다. 키 값은 로그에 안 남김.
-    text, truncated = _call_gemini(image_path, api_key=api_key, model=model, prompt=prompt)
-    _log.info("Gemini OCR 완료: %s (model=%s, truncated=%s)", image_path.name, model, truncated)
-    return {"text": text, "model": model, "truncated": truncated}
+    text, truncated = _call_gemini(
+        image_path, api_key=api_key, model=selected_model, prompt=prompt)
+    _log.info("Gemini OCR 완료: %s (model=%s, truncated=%s)",
+              image_path.name, selected_model, truncated)
+    return {"text": text, "model": selected_model, "truncated": truncated}

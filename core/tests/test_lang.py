@@ -113,7 +113,11 @@ def test_ko_prompt_is_multilingual():
 def test_non_ko_prompt_is_generic_english():
     from core import llm_free
     p = llm_free._build_prompt("en")
-    assert "Extract ALL text" in p
+    assert p == (
+        "Extract ALL text in this image exactly and completely. "
+        "Preserve the original order and structure. "
+        "Output only the extracted text, no commentary or interpretation."
+    )
     assert llm_free._build_prompt("ja") == p  # ko 외 전부 동일 범용
 
 

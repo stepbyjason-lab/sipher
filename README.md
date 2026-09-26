@@ -2,7 +2,7 @@
 
 # Sipher
 
-> **Current public release: v0.1.5**
+> **Current public release: v0.1.6**
 
 **Throw any URL or file at it — get back clean, normalized content.**<br>
 **아무 URL이나 파일을 던지면 — 깨끗하게 정규화된 콘텐츠로 돌려줍니다.**
@@ -65,9 +65,9 @@ credit card.
 | Stage | Models | Cost |
 |---|---|---|
 | Body & comments | Deterministic parsing — no LLM, read straight from the page | Free |
-| Image OCR | **Free ensemble**: current Gemini default `gemini-3.6-flash` + `google/gemma-4-31b-it` + `nvidia/nemotron-nano-12b-v2-vl` (NVIDIA NIM) candidates, cross-checked by a free judge (`gemma-4`). Earlier 2.5-based testing measured the ensemble more accurate than any single model on Korean cards | Free tier |
+| Image OCR | **Writer/judge roster**, configured in `.env.local` (`OCR_CANDIDATES`/`OCR_JUDGES`, `provider:model` lists — no roster is built into the code). The first healthy writer produces one candidate; the first healthy judge inspects the image and corrects it — no unjudged result, no majority vote. Recommended roster (see `.env.example`): Google Gemini/Gemma writers, NIM Gemma/Muse judges falling back to Google. Measured 16/16 passes across 2 runs on 8 card images (0 omissions, 0 background leakage, 0 leaked reasoning) | Free tier |
 | Audio/video transcription | **Local first**: faster-whisper `large-v3` → **free fallback**: Groq `whisper-large-v3-turbo` (then `whisper-large-v3` on quota). Video gets its audio extracted via ffmpeg before upload | Local / free tier |
-| Paid fallback | `claude-sonnet-4-5` — only runs if **you** set `OCR_PAID_FALLBACK=claude` | Opt-in |
+| Paid fallback | Considered only after every configured free writer is exhausted; set `OCR_PAID_FALLBACK=claude` plus `CLAUDE_OCR_MODEL` (required, no built-in default) to opt in. The result still passes through `OCR_JUDGES` | Opt-in |
 
 - When a free quota runs out, sipher leaves an **honest skip/degrade label** instead
   of silently charging you.
@@ -90,10 +90,10 @@ credit card.
 
 ### Enrichment (opt-in)
 
-- `--ocr` — extract text from images. Default is a **free multi-provider
-  ensemble** (Gemini + NVIDIA NIM candidates, cross-checked by a free judge) that
-  measured better than any single model on Korean cards; falls back to Gemini
-  alone without a NIM key.
+- `--ocr` — extract text from images. A single configured writer produces a
+  candidate and a configured judge corrects it against the image (no NIM key →
+  the judge roster falls through to a Google entry); see "The free AI stack"
+  above for the writer/judge roster mechanism.
 - `--transcribe` — transcribe audio/video. Local Whisper first; if it's missing or
   fails, **auto-falls back to free Groq Whisper** — a machine with no GPU can still
   transcribe with just a Groq key.

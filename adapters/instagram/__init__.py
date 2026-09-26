@@ -139,6 +139,87 @@ def _build_context(session_file: str | Path | None):
     return L, instaloader
 
 
+# ── doc_id 사망 대비 폴백 경로 (2026-09-07 실측) ────────────────────────────
+#
+# instaloader 4.15.1이 박아둔 persisted query id(`doc_id=8845758582119845`)가 IG
+# 서버에서 죽었다 — 응답이 `{"errors":[{"message":"execution error",
+# "severity":"CRITICAL"}], "data":null}`이라 라이브러리가 그 None을 subscript해
+# TypeError로 leak한다(아래 fetch()의 `except TypeError` 분기가 잡던 그 증상이며,
+# 이번에는 익명이 아니라 **유효한 로그인 세션에서도** 재현된다).
+#
+# 4.15.3이 doc_id를 새 값 둘(`27128499623469141`·`27234427476213202`)로 갈았지만
+# 같은 세션에서 그 둘도 동일하게 죽어 있었다 — 설치 없이 sdist를 받아 값을 대조한
+# 뒤 라이브로 직접 때려 확인했다. 즉 업그레이드는 해법이 아니고, Meta가 이 값을
+# 계속 회전시키는 한 같은 자리에서 반복해 깨진다.
+#
+# 그래서 doc_id에 의존하지 않는 `api/v1/media/<media_id>/info/`를 폴백으로 둔다.
+# 이건 우리가 새로 판 길이 아니다 — **instaloader가 이미 쓰는 경로**다
+# (`Post._iphone_struct`가 같은 엔드포인트를 부르고, `Post.from_iphone_struct`가 그
+# 응답을 진짜 `Post`로 바꿔준다). 다만 라이브러리는 이것을 주경로로 쓰지 않는데,
+# 이유가 둘이다 — ⓐ 로그인 세션이 있어야만 쓸 수 있고(익명 기본 경로가 될 수 없다)
+# ⓑ `'iphone'` 레이트 버킷이 GraphQL(660초 창)보다 훨씬 빡빡한 **1800초 창**이라
+# 남용하면 30분씩 잠긴다. 그래서 여기서도 **주경로가 아니라 doc_id가 죽었을 때의
+# 구제**로만 쓰고, 호출은 반드시 `get_iphone_json`을 거쳐 그 레이트 제어를 받는다.
+# shortcode→media_id는 base64 알파벳 자리올림이라 네트워크 호출조차 없다.
+_SHORTCODE_ALPHABET = (
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+)
+
+
+def shortcode_to_media_id(code: str) -> int:
+    """IG shortcode → media id(순수 함수, 네트워크 없음).
+
+    shortcode는 media id를 base64 계열 알파벳으로 적은 것이라 자리올림으로 되돌린다.
+    `parse_url`이 이미 문자 집합을 검증하지만, 이 함수를 직접 부르는 경우를 위해
+    알파벳 밖 문자는 `ValueError`로 명확히 거절한다(조용히 잘못된 id를 만들지 않는다).
+    """
+    n = 0
+    for ch in code:
+        try:
+            n = n * 64 + _SHORTCODE_ALPHABET.index(ch)
+        except ValueError as e:
+            raise ValueError(f"shortcode에 허용되지 않는 문자: {ch!r}") from e
+    return n
+
+
+def _fetch_post_via_iphone_api(L, instaloader, code: str):
+    """doc_id 폴백 — **instaloader 자신의 iphone 경로**로 조회한다.
+
+    직접 `requests`로 때리지 않는 이유가 셋이다(2026-09-07 라이브러리 소스 확인).
+
+    1. **레이트 컨트롤러.** `get_iphone_json`은 `'iphone'` 전용 버킷을 거친다 —
+       GraphQL의 660초 창과 달리 **1800초(30분) 슬라이딩 창**이고, 429를 맞으면
+       다음 요청 시각이 30분 뒤로 밀린다. 생 requests로 우회하면 그 보호가
+       사라져 계정이 잠길 수 있다.
+    2. **헤더.** `ig-intended-user-id`·`x-pigeon-rawclienttime`과 이전 응답에서
+       학습한 `iphone_headers`(`ig-set-*`)를 실어 보낸다. 손으로 만든 헤더는
+       그 학습분을 못 싣는다.
+    3. **`Post.from_iphone_struct`가 이미 있다.** 같은 응답을 진짜 `Post`로
+       바꿔주므로 shim을 따로 만들 필요가 없다 — 캐러셀·영상·댓글까지 기존
+       코드 경로가 그대로 돈다.
+
+    이 경로는 로그인 세션이 있어야 한다(`_iphone_struct`도 같은 제약이다). 그래서
+    익명 실패에는 쓰지 않고, 세션이 있는데 doc_id가 죽은 경우에만 구제로 쓴다.
+
+    실패를 예외로 바꾸지 않는다 — 이미 실패한 경로의 구제 시도라, 여기서 새 예외를
+    던지면 원인(doc_id 사망)이 가려진다. None을 돌려 호출부가 원래 예외를 올리게 한다.
+    """
+    try:
+        media_id = shortcode_to_media_id(code)
+        data = L.context.get_iphone_json(
+            path=f"api/v1/media/{media_id}/info/", params={}
+        )
+        items = (data or {}).get("items") or []
+        if not items:
+            _log.warning("instagram: iphone 폴백 응답에 items 없음")
+            return None
+        _log.info("instagram: doc_id 실패 → iphone(api/v1/media/info) 폴백으로 조회 성공")
+        return instaloader.Post.from_iphone_struct(L.context, items[0])
+    except Exception as e:  # 폴백 실패는 원래 실패를 대체하지 않는다
+        _log.warning("instagram: iphone 폴백 실패(%s): %s", type(e).__name__, e)
+        return None
+
+
 def _media_label(
     media_paths: list[str], *, has_media: bool, downloaded: bool, expected: int = 1
 ) -> MediaLabel:
@@ -283,11 +364,13 @@ def fetch(
                 f"프로필 쿠키(docs/00-overview.md §9)를 사용하세요: {e}",
                 access_label="anonymous_blocked",
             ) from e
-        raise InstagramAccessError(
-            f"instagram: 포스트 조회 실패(로그인 세션 사용 중에도 접근 차단 — "
-            f"세션 만료 또는 다른 IG 서버 정책 가능성): {e}",
-            access_label="session_failed",
-        ) from e
+        post = _fetch_post_via_iphone_api(L, instaloader, code)
+        if post is None:
+            raise InstagramAccessError(
+                f"instagram: 포스트 조회 실패(로그인 세션 사용 중에도 접근 차단 — "
+                f"세션 만료 또는 다른 IG 서버 정책 가능성, iphone 폴백도 실패): {e}",
+                access_label="session_failed",
+            ) from e
     except instaloader.exceptions.LoginRequiredException as e:
         if is_anonymous:
             raise InstagramAccessError(
@@ -319,11 +402,16 @@ def fetch(
                 f"쿠키(docs/00-overview.md §9)를 사용하세요: {e}",
                 access_label="anonymous_blocked",
             ) from e
-        raise InstagramAccessError(
-            f"instagram: 포스트 조회 실패(로그인 세션 사용 중에도 동일 TypeError leak "
-            f"증상 — 세션 만료 가능성): {e}",
-            access_label="session_failed",
-        ) from e
+        # 2026-09-07: 이 leak이 죽은 doc_id에서도 나온다(세션은 멀쩡한데 응답이
+        # data=null). 세션이 있으면 doc_id를 안 쓰는 api/v1 경로로 구제한 뒤,
+        # 그것마저 실패할 때만 원래 실패를 올린다.
+        post = _fetch_post_via_iphone_api(L, instaloader, code)
+        if post is None:
+            raise InstagramAccessError(
+                f"instagram: 포스트 조회 실패(로그인 세션 사용 중에도 동일 TypeError leak "
+                f"증상 — 죽은 doc_id 또는 세션 만료 가능성, iphone 폴백도 실패): {e}",
+                access_label="session_failed",
+            ) from e
 
     # round-B: comment_collection_mode는 comments_label과 별개 축 — "성공/실패"가
     # 아니라 "정책상 몇 개를 시도했는가"를 표시한다(계약 §고정 meta 필드명). 이

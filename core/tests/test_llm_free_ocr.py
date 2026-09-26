@@ -36,10 +36,16 @@ def _img(tmp_path) -> Path:
     return p
 
 
+# round-44: 코드에 모델 기본값이 없다 — 단독 호출 경로도 `.env.local`의 로스터에서
+# 모델을 얻는다. 그래서 이 fixture 로스터가 없으면 `ocr_image`는 호출 전에 실패한다.
+_TEST_MODEL = "test-google-model"
+_TEST_ROSTER = f"google:{_TEST_MODEL}"
+
+
 def test_single_key_config(tmp_path):
-    _env(tmp_path / ".env.local", GEMINI_API_KEY="k1")
+    _env(tmp_path / ".env.local", GEMINI_API_KEY="k1", OCR_CANDIDATES=_TEST_ROSTER)
     key, model = L._config()
-    assert key == "k1" and model == L._DEFAULT_MODEL
+    assert key == "k1" and model == _TEST_MODEL
 
 
 def test_extra_numbered_keys_are_ignored(tmp_path):
@@ -52,15 +58,15 @@ def test_extra_numbered_keys_are_ignored(tmp_path):
 
 
 def test_ocr_success(tmp_path, monkeypatch):
-    _env(tmp_path / ".env.local", GEMINI_API_KEY="k1")
+    _env(tmp_path / ".env.local", GEMINI_API_KEY="k1", OCR_CANDIDATES=_TEST_ROSTER)
     monkeypatch.setattr(L, "_call_gemini", lambda p, *, api_key, model, prompt=None: ("OK", False))
     r = L.ocr_image(_img(tmp_path))
-    assert r["text"] == "OK" and r["model"] == L._DEFAULT_MODEL
+    assert r["text"] == "OK" and r["model"] == _TEST_MODEL
     assert r["truncated"] is False
 
 
 def test_quota_propagates(tmp_path, monkeypatch):
-    _env(tmp_path / ".env.local", GEMINI_API_KEY="k1")
+    _env(tmp_path / ".env.local", GEMINI_API_KEY="k1", OCR_CANDIDATES=_TEST_ROSTER)
     def boom(p, *, api_key, model, prompt=None):
         raise L._QuotaExhausted("429")
     monkeypatch.setattr(L, "_call_gemini", boom)
@@ -170,8 +176,22 @@ def test_no_key_raises(tmp_path):
         assert "GEMINI_API_KEY" in str(e)
 
 
+def test_r44_no_roster_raises_instead_of_inventing_a_default(tmp_path, monkeypatch):
+    """설정에 Google writer가 없으면 기본값을 지어내지 않고 실패한다.
+
+    이전 판본은 `.env.example`의 첫 항목을 호환 기본값으로 읽었다 — 예시 파일이
+    실행 기본값을 정하는 구조라, 사용자가 설정한 적 없는 모델이 불릴 수 있었다.
+    """
+    _env(tmp_path / ".env.local", GEMINI_API_KEY="k1")  # 로스터 없음
+    monkeypatch.setattr(L, "_call_gemini",
+                        lambda p, *, api_key, model, prompt=None: ("안 불려야 한다", False))
+    with pytest.raises(L.OcrError) as excinfo:
+        L.ocr_image(_img(tmp_path))
+    assert "OCR_CANDIDATES" in str(excinfo.value)
+
+
 def test_key_value_not_logged(tmp_path, monkeypatch):
-    _env(tmp_path / ".env.local", GEMINI_API_KEY="SECRETKEY_ABC")
+    _env(tmp_path / ".env.local", GEMINI_API_KEY="SECRETKEY_ABC", OCR_CANDIDATES=_TEST_ROSTER)
     recs = []
     h = logging.Handler(); h.emit = lambda r: recs.append(h.format(r))
     L._log.addHandler(h); L._log.setLevel(logging.DEBUG)
@@ -304,8 +324,65 @@ def test_call_gemini_missing_finish_reason_defaults_to_not_truncated(tmp_path, m
     assert truncated is False
 
 
+# ── round-44: 생각 채널 조각을 OCR 결과로 읽던 결함 ──────────────────────────
+# 2026-09-17 라이브 실측: `gemma-4-31b-it` 응답이 parts=2 로 왔고 part[0] 이
+# `thought: True` 인 1,643자 추론, part[1] 이 48자 최종 답이었다. `parts[0]` 만
+# 읽던 파서가 그 추론을 OCR 결과로 반환해, judge 7회 중 6회에서 사고 뼈대
+# (`Input:`·`Goal:`·`Constraints:`)와 배경 텍스트가 결과에 섞였다. 조각이 하나뿐인
+# 모델(`gemini-3.1-flash-lite` 등)에서는 이 결함이 드러나지 않아 오래 숨어 있었다.
+
+def test_call_gemini_skips_thought_part_and_returns_final_answer(tmp_path, monkeypatch):
+    payload = {"candidates": [{"content": {"parts": [
+        {"text": "*   Goal: OCR 교정\n    *   배경 간판: SPICY TUNA-BAGUETTE -> 제외",
+         "thought": True},
+        {"text": "AI TREND\n유료 AI 100개"},
+    ]}, "finishReason": "STOP"}]}
+    monkeypatch.setattr(L.requests, "post", lambda *a, **kw: _FakeResp(200, payload))
+    text, truncated = L._call_gemini(_img(tmp_path), api_key="k", model="gemma-4-31b-it")
+    assert text == "AI TREND\n유료 AI 100개"
+    assert "Goal:" not in text                    # 사고 뼈대가 안 샌다
+    assert "SPICY TUNA-BAGUETTE" not in text      # 추론 안의 배경 텍스트도 안 샌다
+    assert truncated is False
+
+
+def test_call_gemini_thought_only_response_is_empty_for_shared_gate(tmp_path, monkeypatch):
+    """생각 조각만 오면 빈 문자열 — 공용 빈 응답 관문이 사다리를 내려가게 한다.
+
+    여기서 추론을 반환하면 '검증되지 않은 글'이 성공으로 흘러간다.
+    """
+    payload = {"candidates": [{"content": {"parts": [{"text": "추론만 있음", "thought": True}]},
+                                "finishReason": "STOP"}]}
+    monkeypatch.setattr(L.requests, "post", lambda *a, **kw: _FakeResp(200, payload))
+    text, _truncated = L._call_gemini(_img(tmp_path), api_key="k", model="gemma-4-31b-it")
+    assert text == ""
+
+
+def test_call_gemini_empty_parts_stays_malformed(tmp_path, monkeypatch):
+    """조각이 아예 없으면 기존대로 형식 이상 — 빈 성공으로 통과시키지 않는다."""
+    payload = {"candidates": [{"content": {"parts": []}, "finishReason": "STOP"}]}
+    monkeypatch.setattr(L.requests, "post", lambda *a, **kw: _FakeResp(200, payload))
+    with pytest.raises(L.OcrError):
+        L._call_gemini(_img(tmp_path), api_key="k", model="gemma-4-31b-it")
+
+
+@pytest.mark.parametrize("parts", [["oops"], [None], {"text": "x"}])
+def test_call_gemini_non_dict_parts_normalize_to_ocr_error(tmp_path, monkeypatch, parts):
+    """조각이 dict가 아닌 malformed 응답도 `OcrError`로 정규화돼야 한다.
+
+    조각을 순회하기 전에는 `parts[0]["text"]`가 이 형태에서 `TypeError`를 내 잡혔다.
+    `part.get(...)`으로 바꾸면서 `AttributeError`가 잡는 튜플 밖으로 나갔고, 그러면
+    "이 모듈의 실패는 전부 `OcrError`"라는 계약이 그 형태에서만 뚫린다 —
+    `_collect_candidates`·judge 루프·`normalize.py`가 전부 `OcrError` 분기를
+    놓치고 일반 예외 분기로 떨어져 실패 사유가 로그에서 지워진다.
+    """
+    payload = {"candidates": [{"content": {"parts": parts}, "finishReason": "STOP"}]}
+    monkeypatch.setattr(L.requests, "post", lambda *a, **kw: _FakeResp(200, payload))
+    with pytest.raises(L.OcrError):
+        L._call_gemini(_img(tmp_path), api_key="k", model="gemma-4-31b-it")
+
+
 def test_ocr_image_propagates_truncated_flag_from_call_gemini(tmp_path, monkeypatch):
-    _env(tmp_path / ".env.local", GEMINI_API_KEY="k1")
+    _env(tmp_path / ".env.local", GEMINI_API_KEY="k1", OCR_CANDIDATES=_TEST_ROSTER)
     monkeypatch.setattr(L, "_call_gemini", lambda p, *, api_key, model, prompt=None: ("잘림", True))
     r = L.ocr_image(_img(tmp_path))
     assert r["truncated"] is True
