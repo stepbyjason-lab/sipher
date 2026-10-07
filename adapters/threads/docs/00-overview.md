@@ -125,7 +125,12 @@ root에 대한 다른 사람의 답글·그 답글 아래의 대화는 기본 �
 원저자 thread 전체의 완전 수집을 뜻하지는 않는다.
 
 `author_thread[]`는 원저자 게시 시각 오름차순이며 `meta.author_thread.codes`도 같은 순서다.
-정렬 근거인 `taken_at`은 공개 스키마에 노출하지 않는다(내부 정렬 정책).
+raw `taken_at`(epoch 초)은 노출하지 않고, R48부터 게시 시각을 `created_at_utc`(ISO 8601 UTC,
+예: `2025-08-28T03:12:45+00:00`)로 공개한다 — `meta.created_at_utc`는 root 포스트, 각
+`author_thread[]`·`comments[]` 항목의 `created_at_utc`는 그 항목의 게시 시각이다. fast·continuation·deep
+모두 raw `taken_at`을 받는다. 값이 없거나 비정상(비수치·NaN·무한·0 이하·범위 밖)이면 `null`이며,
+수집 시각 `fetched_at`으로 대신 채우지 않는다. 이름은 TikTok `meta.created_at_utc`·Instagram
+`comments[].created_at_utc`와 같다.
 
 `meta.author_thread.resolution.status`는 `complete`(정책 범위의 후보 해소 완료),
 `partial`(시간·페이지·hop 상한 또는 child 실패로 일부 후보 미해소), `not_run`(명시 수집

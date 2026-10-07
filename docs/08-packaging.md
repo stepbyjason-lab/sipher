@@ -19,7 +19,7 @@
 | 프로필 | 정의 | 대상 |
 |---|---|---|
 | **LITE** | core + naver_blog + youtube + tiktok + web. 공개 콘텐츠 + 무료 API OCR(Gemini 키). 개인 로그인 세션 불필요. | 팀원·지인 — 공유 쉬움 |
-| **FULL** | LITE + threads + facebook + instagram + local whisper 전사. 브라우저 로그인 세션·GPU 필요. LITE도 `GROQ_API_KEY`만 있으면 무료 Groq Whisper로 전사 가능(round-27, local 불필요). | 본인/신뢰 대상(local whisper) — 전사만이면 LITE + Groq 키로도 가능 |
+| **FULL** | LITE + threads + facebook + instagram + x + local whisper 전사. 브라우저 로그인 세션(x는 로그인 쿠키 파일)·GPU 필요. LITE도 `GROQ_API_KEY`만 있으면 무료 Groq Whisper로 전사 가능(round-27, local 불필요). | 본인/신뢰 대상(local whisper) — 전사만이면 LITE + Groq 키로도 가능 |
 
 ## 2. 의존성 매트릭스 (실측)
 
@@ -33,6 +33,7 @@
 | threads | playwright, parsel | deep 크롤 시 권장 | FULL |
 | facebook | playwright(+옵션 browser_cookie3) | 필수 | FULL |
 | instagram | instaloader | 필수(익명 접근 대부분 403) | FULL |
+| x | gallery-dl(subprocess 호출, tiktok과 같은 패키지라 LITE 설치에 이미 포함) + 선택: 시스템 ffprobe | 필수(넷스케이프 형식 쿠키 파일, `X_COOKIES_FILE`) | FULL |
 | 전사(`core/transcribe.py`) | local: 시스템 도구(subprocess), GPU large-v3 권장 / Groq 폴백(round-27): **requests**(공통 의존에 이미 포함, SDK 신규 없음) | — | local=FULL 권장(옵션), Groq=LITE도 `GROQ_API_KEY`만 있으면 가능 |
 
 ## 3. setup 스크립트 사용법
@@ -61,6 +62,7 @@ scripts/setup.ps1 [-Profile lite|full] [-Browsers]
 | ffmpeg | 포맷 병합·자막 변환 | youtube |
 | whisper 계열 전사 도구(GPU large-v3 권장) | 음성 전사(local backend, 최우선) | core/transcribe.py(FULL 권장, 없으면 Groq 폴백) |
 | ffmpeg(선택, Groq 경로) | 25MB 초과/영상 컨테이너를 오디오만 추출해 Groq 업로드(round-27) | core/transcribe.py — 없으면 해당 아이템 정직 skip |
+| ffprobe(선택, ffmpeg 패키지에 포함) | X 미디어를 받은 뒤 파일의 실제 가로세로를 잼 — 없으면 X가 선언한 크기로 채우고 `meta.media_files[].size_source`가 `sidecar`가 된다 | x |
 | Google Chrome 또는 Playwright bundled Chromium | 헤드리스 브라우저 크롤. Chrome을 우선 사용하고 없거나 실행 불가하면 bundled Chromium으로 fallback | threads, facebook, instagram(간접), web tier2 |
 
 ## 5. API 키 / 로그인 세션
@@ -72,6 +74,7 @@ scripts/setup.ps1 [-Profile lite|full] [-Browsers]
 | `OCR_CANDIDATES` | writer 로스터 — `provider:model` 콤마 목록, 왼쪽이 1순위. 비어 있으면 writer를 아예 호출하지 않는다(`.env.example` 참조) | `--ocr` 옵션 사용 시 |
 | `OCR_JUDGES` | judge 로스터 — 형식은 `OCR_CANDIDATES`와 동일. 살아 있는 첫 judge가 이미지를 직접 보며 후보를 교정 | `--ocr` 옵션 사용 시 |
 | `GROQ_API_KEY` | 무료 전사 폴백(round-27, `core/transcribe.py`). local whisper가 없거나 개별 아이템에서 실패했을 때만 사용 — `whisper-large-v3-turbo`→`whisper-large-v3`(429 시) 순. https://console.groq.com (카드 불필요). **단일 키** 안에서 Groq가 제공한 모델별 무료 버킷만 사용 | 선택(local 없을 때 대체) |
+| `X_COOKIES_FILE` | x.com 로그인 쿠키 파일(넷스케이프 형식 `cookies.txt`)의 경로. `.env.local` 또는 환경변수, 상대경로는 저장소 루트 기준. 쿠키 파일은 로그인 세션 자체이므로 저장소 밖에 두고 커밋하지 않는다 | X 어댑터 사용 시 필수 |
 | threads 로그인 세션 | deep 크롤 시 안정성 향상 | 권장(FULL) |
 | facebook 로그인 세션(persistent context/cookies) | 인증 콘텐츠 접근 | 필수(FULL) |
 | instagram 로그인 세션 | 익명 접근이 거의 항상 403 | 사실상 필수(FULL) |
@@ -90,6 +93,8 @@ scripts/setup.ps1 [-Profile lite|full] [-Browsers]
 | 전사(local whisper → Groq 폴백, round-27) | `meta.transcript_label = "skipped_no_tool"`(둘 다 없음) — 있으면 `meta.transcript_backend`에 `"local"`/`"groq"` 표기 | `core/normalize.py`, `core/transcribe.py` |
 | facebook 풀사이즈 이미지 회수 | `meta.fullsize_label` | `adapters/facebook/__init__.py` |
 | instagram 접근 실패 | `InstagramAccessError.access_label`(예: `"anonymous_blocked"`) | `adapters/instagram/__init__.py` |
+| x 쿠키 미설정·파일 없음·만료 | 라벨이 아니라 **오류** — `AuthRequired`(빈 결과를 성공으로 내지 않는다) | `adapters/x/__init__.py` |
+| x 미디어 실제 크기 측정(ffprobe 없음) | `meta.media_files[].size_source = "sidecar"`(선언 크기). 측정했으면 `"probe"` | `adapters/x/__init__.py` |
 | facebook 댓글(옵트인 안 함/추출 실패) | `meta.comments_label`: `not_collected`(기본) / `fetch_failed`(추출 실패, `none`=댓글0과 구분, round-16) | `adapters/facebook/__init__.py`, `scrape.py` |
 
 값 taxonomy 전체 정본은 `docs/04-architecture.md` §4.4(API/데이터 계약) 참조.
@@ -120,9 +125,15 @@ scripts/setup.ps1 [-Profile lite|full] [-Browsers]
 시간만큼 대기한 뒤 후보 수집을 1회만 재시도한다(이미지당 상한 1회). 잔여
 쿨다운이 `image_max_wait`를 넘으면 기다리지 않고 skip한다.
 
-**배치 누적 대기 상한**: 프로세스 전체의 재시도-대기 누적 시간이
-`OCR_MAX_TOTAL_WAIT`(기본 600초)를 넘으면, 이후 이미지들은 대기 없이 기존
-skip 동작만 한다(대량 배치에서 최악 지연을 방지).
+**유료 폴백 동의 질문**: 설정된 무료 writer가 전부 소진돼 유료 폴백을 고려하는 시점에
+`OCR_PAID_FALLBACK=claude`가 이미 설정돼 있으면 묻지 않고 진행한다. 설정돼 있지 않으면
+대화형 터미널(TTY)에서만 한 번 묻고(비대화형이면 묻지 않고 거절), **60초 안에 답이 없으면
+거절**로 처리해 다음으로 넘어간다. 한 번 나온 답(거절 포함)은 같은 프로세스에서 다시 묻지 않는다.
+
+**게시물 누적 대기 상한**: 게시물 하나(이미지 여러 장)의 재시도-대기 누적 시간이
+`OCR_MAX_TOTAL_WAIT`(기본 600초)를 넘으면, 그 게시물의 남은 이미지들은 대기 없이 기존
+skip 동작만 한다(이미지가 많은 게시물에서 최악 지연을 방지). 다음 게시물은 예산을
+처음부터 다시 받는다.
 
 **선제 페이싱**: 같은 provider의 연속 호출 사이에 최소 간격(`OCR_MIN_INTERVAL`,
 기본 6초)을 둔다 — RPM이 provider 단위 한도이므로 provider별 독립 적용(앙상블
@@ -133,7 +144,7 @@ skip 동작만 한다(대량 배치에서 최악 지연을 방지).
 |---|---|---|
 | `OCR_MIN_INTERVAL` | `6`(초) | 같은 provider 연속 호출 사이 최소 간격. `0`=비활성화 |
 | `OCR_IMAGE_MAX_WAIT` | `90`(초) | 이미지당 재시도 트리거 시 기다릴 수 있는 최대 쿨다운 잔여 시간 |
-| `OCR_MAX_TOTAL_WAIT` | `600`(초) | 배치(프로세스) 전체 재시도-대기 누적 상한 |
+| `OCR_MAX_TOTAL_WAIT` | `600`(초) | 게시물 하나의 재시도-대기 누적 상한(다음 게시물은 다시 채워진다) |
 
 상태(쿨다운/강등/연속실패 카운터)는 **모듈 전역 = 프로세스 로컬**이다(병렬
 실행을 전제하지 않는 sipher CLI의 단발 프로세스 모델과 동일).
@@ -182,7 +193,7 @@ scripts/make-dist.ps1
 루트 `LICENSE` = **MIT**(Copyright (c) 2026 stepbyjason-lab). 사용자가 사용한
 다른 도구들(vendored threads=MIT, web-engine=MIT, instaloader=MIT, markitdown=MIT,
 yt-dlp=Unlicense)과 호환. `gallery-dl`(GPL-2.0)은 subprocess 호출만 하므로 전파
-없음(`adapters/tiktok/requirements.txt`·`adapters/README.md` §라이선스 원칙 참조).
+없음(`adapters/tiktok/requirements.txt`·`adapters/x/requirements.txt`·`adapters/README.md` §라이선스 원칙 참조).
 
 - 루트 `LICENSE`는 **sipher 자체 코드**를 커버한다.
 - vendored/third-party 컴포넌트는 각자 라이선스 유지(`adapters/threads/LICENSE`,

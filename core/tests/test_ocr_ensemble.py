@@ -1580,6 +1580,198 @@ def test_r37_judge_call_wired_to_resolve_lang_not_hardcoded(tmp_path, monkeypatc
     assert "untrusted" in captured["judge_prompt"].lower()
 
 
+# ── R47: 유료 동의 시간 제한 · 게시물 단위 대기 예산 · 실패 원인 ───────────
+
+def test_r47_unanswered_paid_consent_on_tty_times_out_as_decline(tmp_path, monkeypatch):
+    # pseudo-TTY가 붙은 비대화형 배치: isatty()=True인데 아무도 답하지 않는다.
+    # 이전엔 input()이 영원히 기다렸다 — 이제 시간이 지나면 거절, 유료 미호출, 재질문 없음.
+    import builtins
+    import threading
+    import time as _time
+
+    _reset(monkeypatch, anthropic=True, extra_env={"OCR_CANDIDATES": "google:spent"})
+    monkeypatch.setattr(llm_free, "ocr_image", lambda *a, **kw: (_ for _ in ()).throw(
+        llm_free._QuotaExhausted("RPD")))
+    paid_calls = []
+    monkeypatch.setattr(E, "_call_claude",
+                        lambda p, *, prompt: paid_calls.append(1) or ("PAID", "claude", False))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(E, "_PAID_CONSENT_TIMEOUT", 0.2)
+    release = threading.Event()
+    asked = []
+
+    def never_answers(prompt=""):
+        asked.append(prompt)
+        release.wait(5)
+        raise EOFError
+
+    monkeypatch.setattr(builtins, "input", never_answers)
+    try:
+        started = _time.monotonic()
+        with pytest.raises(E.OcrError):
+            E.ocr_image_ensemble(_img(tmp_path))
+        assert _time.monotonic() - started < 3
+        assert paid_calls == []
+        assert E._paid_consent is False
+        assert E._ask_paid_consent() is False
+        assert len(asked) == 1  # 같은 프로세스에서 다시 묻지 않는다
+    finally:
+        release.set()
+
+
+def test_r47_paid_consent_answered_in_time_is_honoured(monkeypatch):
+    import builtins
+
+    _reset(monkeypatch, anthropic=True)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(builtins, "input", lambda prompt="": "y")
+    assert E._ask_paid_consent() is True
+
+
+def test_r47_wait_budget_is_per_post_not_per_process(tmp_path, monkeypatch):
+    # 게시물 안에서는 OCR_MAX_TOTAL_WAIT 상한 유지, 다음 게시물은 예산을 새로 받는다.
+    from core import normalize as N
+
+    clock = _reset(monkeypatch, nim=False, extra_env={"OCR_MAX_TOTAL_WAIT": "10"})
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    monkeypatch.setattr(llm_free, "ocr_image", lambda *a, **kw: (_ for _ in ()).throw(
+        llm_free._RateLimited("RPM", retry_after=8.0)))
+    one = tmp_path / "one.jpg"
+    two = tmp_path / "two.jpg"
+    for p in (one, two):
+        p.write_bytes(b"\xff\xd8\xff" + b"0" * 100)
+
+    # 게시물 1: 이미지 둘 — 첫 이미지만 8s 대기, 둘째는 8+8 > 10이라 대기 없이 skip.
+    N.enrich_ocr({"media_paths": [str(one), str(two)], "meta": {}})
+    assert clock.slept == [8.0]
+
+    clock.advance(9.0)
+    clock.slept.clear()
+    # 게시물 2: 예산이 다시 차서 쿨다운 대기 후 재시도한다(이전엔 프로세스 내내 skip).
+    N.enrich_ocr({"media_paths": [str(one)], "meta": {}})
+    assert clock.slept == [8.0]
+
+
+def _nim_post(status=200, data=None, json_error=None, exc=None):
+    def post(*a, **kw):
+        if exc is not None:
+            raise exc
+        r = _VendorResponse(data=data, json_error=json_error)
+        r.status_code = status
+        return r
+    return post
+
+
+@pytest.mark.parametrize("post, expected", [
+    (_nim_post(exc=requests.exceptions.ReadTimeout("slow")), "timeout"),
+    (_nim_post(exc=requests.exceptions.ConnectionError("down")), "network"),
+    (_nim_post(status=503), "http_5xx"),
+    (_nim_post(status=400), "http_4xx"),
+    (_nim_post(status=429), "rate_limited"),
+    (_nim_post(status=402), "quota_exhausted"),
+    (_nim_post(json_error=requests.exceptions.JSONDecodeError("bad json", "<html>", 0)), "bad_json"),
+    (_nim_post(data=[]), "bad_response"),
+])
+def test_r47_classify_failure_separates_vendor_causes(tmp_path, monkeypatch, post, expected):
+    _reset(monkeypatch)
+    monkeypatch.setattr(E.requests, "post", post)
+    with pytest.raises(llm_free.OcrError) as ei:
+        E._call_nim(_img(tmp_path), model=_TEST_NIM_GEMMA, prompt="OCR")
+    assert E.classify_failure(ei.value) == expected
+
+
+def test_r47_classify_failure_reads_gemini_retry_exhaustion(tmp_path, monkeypatch):
+    # Gemini는 5xx·타임아웃을 자체 재시도한 뒤 「재시도 소진」 하나로 올린다 — 원인이 남아야 한다.
+    class _Resp:
+        status_code = 503
+        text = "unavailable"
+
+    monkeypatch.setattr(llm_free.time, "sleep", lambda s: None)
+    monkeypatch.setattr(llm_free.requests, "post", lambda *a, **kw: _Resp())
+    with pytest.raises(llm_free.OcrError) as ei:
+        llm_free._call_gemini(_img(tmp_path), api_key="key", model="m")
+    assert E.classify_failure(ei.value) == "http_5xx"
+
+    monkeypatch.setattr(llm_free.requests, "post", lambda *a, **kw: (_ for _ in ()).throw(
+        requests.exceptions.ReadTimeout("slow")))
+    with pytest.raises(llm_free.OcrError) as ei:
+        llm_free._call_gemini(_img(tmp_path), api_key="key", model="m")
+    assert E.classify_failure(ei.value) == "timeout"
+
+
+def test_r47_failed_image_error_carries_per_provider_attempts(tmp_path, monkeypatch):
+    _reset(monkeypatch, extra_env={
+        "OCR_CANDIDATES": "google:w1,nim:w2",
+        "OCR_JUDGES": "nim:j1",
+    })
+    timeout_err = llm_free.OcrError("Gemini OCR 재시도 소진")
+    timeout_err.__cause__ = requests.exceptions.ReadTimeout("slow")
+    monkeypatch.setattr(llm_free, "ocr_image", lambda *a, **kw: (_ for _ in ()).throw(timeout_err))
+
+    def nim(p, *, model, prompt):
+        if model == "j1":
+            raise llm_free.OcrError("NIM HTTP 503")
+        return "WRITER TEXT", False
+
+    monkeypatch.setattr(E, "_call_nim", nim)
+    with pytest.raises(E.OcrError) as ei:
+        E.ocr_image_ensemble(_img(tmp_path))
+    assert E.classify_failure(ei.value) == "judge_failed"
+    assert ei.value.attempts == [
+        {"provider": "writer:google:w1", "reason": "timeout"},
+        {"provider": "judge:nim:j1", "reason": "http_5xx"},
+    ]
+
+
+def test_r47_paid_writer_failure_is_recorded_in_public_ocr_errors(tmp_path, monkeypatch):
+    # F47-001: 유료 Claude writer는 `_call_with_pacing`을 안 거쳐 attempts에서 빠졌다.
+    from core import normalize as N
+
+    _reset(monkeypatch, anthropic=True, extra_env={
+        "OCR_PAID_FALLBACK": "claude", "OCR_CANDIDATES": "google:spent",
+    })
+    monkeypatch.setattr(llm_free, "ocr_image", lambda *a, **kw: (_ for _ in ()).throw(
+        llm_free._QuotaExhausted("RPD")))
+    monkeypatch.setattr(E.requests, "post", _nim_post(status=503))  # 실제 `_call_claude` 경로
+    img = tmp_path / "paid.jpg"
+    img.write_bytes(b"\xff\xd8\xff" + b"0" * 100)
+
+    out = N.enrich_ocr({"media_paths": [str(img)], "meta": {}})
+
+    assert out["meta"]["ocr_errors"] == [{
+        "media_path": str(img),
+        "reason": "http_5xx",
+        "attempts": [
+            {"provider": "writer:google:spent", "reason": "quota_exhausted"},
+            {"provider": "writer:paid:claude-test", "reason": "http_5xx"},
+        ],
+    }]
+
+
+def test_r47_paid_fallback_without_model_is_not_recorded_as_attempt(tmp_path, monkeypatch):
+    # F47-003: CLAUDE_OCR_MODEL이 비면 유료 호출에 도달하지 않는다 — `writer:paid:`를 시도로 남기지 않는다.
+    from core import normalize as N
+
+    _reset(monkeypatch, anthropic=True, extra_env={
+        "OCR_PAID_FALLBACK": "claude", "OCR_CANDIDATES": "google:spent",
+        "CLAUDE_OCR_MODEL": "",
+    })
+    monkeypatch.setattr(llm_free, "ocr_image", lambda *a, **kw: (_ for _ in ()).throw(
+        llm_free._QuotaExhausted("RPD")))
+    monkeypatch.setattr(E.requests, "post",
+                        lambda *a, **kw: pytest.fail("모델 없이 유료 API를 부르면 안 된다"))
+    img = tmp_path / "paid.jpg"
+    img.write_bytes(b"\xff\xd8\xff" + b"0" * 100)
+
+    out = N.enrich_ocr({"media_paths": [str(img)], "meta": {}})
+
+    assert out["meta"]["ocr_errors"] == [{
+        "media_path": str(img),
+        "reason": "writer_failed",
+        "attempts": [{"provider": "writer:google:spent", "reason": "quota_exhausted"}],
+    }]
+
+
 if __name__ == "__main__":
     import tempfile
     import traceback

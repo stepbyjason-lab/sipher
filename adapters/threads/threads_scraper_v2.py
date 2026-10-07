@@ -40,6 +40,7 @@ def parse_post(post_data: Dict) -> Dict:
             "author": author,
             "likes": post_data.get("like_count", 0),
             "reply_count": post_data.get("text_post_app_info", {}).get("direct_reply_count", 0),
+            "taken_at": post_data.get("taken_at"),
             "images": images,
             "videos": videos,
         }

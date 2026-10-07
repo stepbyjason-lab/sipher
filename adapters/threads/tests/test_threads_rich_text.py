@@ -372,15 +372,17 @@ def test_threads_handoff_indexes_record_completed_rounds_and_unnumbered_ocr_back
     if not handoff_root.is_dir():
         return
     roadmap = (handoff_root / "ROADMAP.md").read_text(encoding="utf-8")
+    detail = (handoff_root / "roadmap-detail.md").read_text(encoding="utf-8")
     latest = (handoff_root / "rounds" / "LATEST.md").read_text(encoding="utf-8")
 
-    assert "R40-H2" in roadmap
-    assert "## ✅ R43 완료" in roadmap
-    assert "## ✅ R43-H1 완료" in roadmap
-    assert "### 조건부·미번호 백로그 — 프리미엄 벤더 OCR judge 벤치마크·선정" in roadmap
-    assert "### R41 — 프리미엄 벤더 OCR judge 벤치마크·선정" not in roadmap
-    assert "round-42-threads-continuation-time-budget-plan-lite.md" in latest
-    assert "R42 완료" in latest
+    # 2026-10-05 로드맵 재구성: 완료 라운드는 ROADMAP 4열 표의 행, 상세 제목은 roadmap-detail.md.
+    for round_id in ("R40-H2", "R41", "R42", "R43", "R43-H1"):
+        assert f"| {round_id} · " in roadmap
+    # OCR judge 벤치마크는 미번호 조건부 백로그다 — 옛 R41 번호 표기가 어디에도 남지 않는다.
+    assert "| OCR judge 벤치마크 · 미번호 ·" in roadmap
+    for text in (roadmap, detail):
+        assert "R41 — 프리미엄 벤더 OCR judge" not in text
+    assert "../ROADMAP.md" in latest
 
 
 def test_r43_public_docs_explain_threads_partial_consumption():

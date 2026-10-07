@@ -151,3 +151,34 @@ def test_r38b_youtube_fetch_completes_when_comments_call_raises(monkeypatch):
     assert out["body_text"] == "kept body"
     assert out["comments"] == []
     assert out["meta"]["comments_label"] == "fetch_failed"
+
+
+def test_r47_media_dir_mkdir_oserror_keeps_metadata_and_labels_failure(tmp_path, monkeypatch):
+    # R47(R38-D): 미디어 폴더 자리에 같은 이름의 일반 파일 → mkdir가 OSError(FileExistsError).
+    # 이전엔 그 예외가 fetch 밖으로 나가 probe로 받은 제목·본문·챕터가 통째로 사라졌다.
+    blocker = tmp_path / "downloads"
+    blocker.write_text("not a directory", encoding="utf-8")
+    chapters = [{"title": "intro", "start_time": 0.0}]
+    monkeypatch.setattr(
+        youtube.scrape,
+        "probe",
+        lambda url: {"id": "abcdefghijk", "title": "kept title",
+                     "description": "kept body", "chapters": chapters},
+    )
+    monkeypatch.setattr(
+        youtube.scrape, "_run",
+        lambda *a, **k: pytest.fail("폴더 생성 실패 뒤 yt-dlp를 부르면 안 된다"),
+    )
+
+    out = youtube.fetch(
+        "https://youtube.com/watch?v=abcdefghijk",
+        media_dir=blocker,
+        with_chat=True,
+    )
+
+    assert out["body_text"] == "kept body"
+    assert out["meta"]["title"] == "kept title"
+    assert out["meta"]["chapters"] == chapters
+    assert out["media_paths"] == []
+    assert out["meta"]["video_label"] == "download_failed"
+    assert out["meta"]["chat_label"] == "download_failed"

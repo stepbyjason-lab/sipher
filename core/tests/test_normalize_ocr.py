@@ -179,3 +179,58 @@ def test_r38a_ocr_failures_never_produce_done_label(tmp_path, monkeypatch, failu
     out = N.enrich_ocr(_result(paths, image_count=1))
 
     assert out["meta"]["ocr_label"] != "done"
+
+
+def test_r47_underreported_image_count_all_success_is_done(tmp_path, monkeypatch):
+    # 어댑터 신고 2장, 실제 3장 받아 3장 전부 성공 → done(이전엔 done(3)==expected(2) 거짓 → partial).
+    paths = [_img(tmp_path, f"{i}.jpg") for i in range(3)]
+    monkeypatch.setattr(_E, "is_available", lambda: True)
+    monkeypatch.setattr(_E, "ocr_image_ensemble",
+                        lambda path: {"text": "ok", "model": "m", "mode": "ensemble"})
+
+    out = N.enrich_ocr(_result(paths, image_count=2))
+
+    assert out["meta"]["ocr_label"] == "done"
+    assert len(out["ocr_text"]) == 3
+
+
+def test_r47_underreported_image_count_keeps_partial_when_fewer_downloaded():
+    # 신고보다 적게 받은 경우의 기존 partial은 그대로다.
+    assert N._ocr_label(
+        provider_available=True, expected_images=3, local_images=2, done=2,
+    ) == "partial"
+
+
+def test_r47_failed_images_record_reason_and_attempts(tmp_path, monkeypatch):
+    paths = [_img(tmp_path, "ok.jpg"), _img(tmp_path, "judge.jpg"), _img(tmp_path, "bug.jpg")]
+    monkeypatch.setattr(_E, "is_available", lambda: True)
+    attempts = [{"provider": "judge:nim:j", "reason": "http_5xx"}]
+
+    def fake_ensemble(path):
+        if path.name == "judge.jpg":
+            err = _E._ocr_error("judge 전부 실패", "judge_failed")
+            err.attempts = attempts
+            raise err
+        if path.name == "bug.jpg":
+            raise RuntimeError("unknown")
+        return {"text": "ok", "model": "m", "mode": "ensemble"}
+
+    monkeypatch.setattr(_E, "ocr_image_ensemble", fake_ensemble)
+    out = N.enrich_ocr(_result(paths))
+
+    assert out["meta"]["ocr_label"] == "partial"  # 라벨 어휘는 그대로
+    assert out["meta"]["ocr_errors"] == [
+        {"media_path": paths[1], "reason": "judge_failed", "attempts": attempts},
+        {"media_path": paths[2], "reason": "unexpected", "attempts": []},
+    ]
+
+
+def test_r47_no_ocr_errors_key_when_nothing_failed(tmp_path, monkeypatch):
+    # 실패 없는 게시물의 출력은 R47 이전과 같다(하위 호환 — 새 키를 싣지 않는다).
+    monkeypatch.setattr(_E, "is_available", lambda: True)
+    monkeypatch.setattr(_E, "ocr_image_ensemble",
+                        lambda path: {"text": "ok", "model": "m", "mode": "ensemble"})
+
+    out = N.enrich_ocr(_result([_img(tmp_path, "a.jpg")]))
+
+    assert "ocr_errors" not in out["meta"]

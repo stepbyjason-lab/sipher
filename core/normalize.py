@@ -34,7 +34,9 @@ __all__ = ["enrich_ocr", "enrich_transcribe"]
 _log = logging.getLogger(__name__)
 
 OcrLabel = Literal["none", "not_downloaded", "done", "partial", "skipped_no_provider", "failed"]
-TranscribeLabel = Literal["none", "not_downloaded", "done", "partial", "failed", "skipped_no_tool"]
+TranscribeLabel = Literal[
+    "none", "not_downloaded", "done", "partial", "failed", "skipped_no_tool", "skipped_ambient_audio",
+]
 
 _IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 _AV_EXTS = {
@@ -75,7 +77,10 @@ def _ocr_label(
     if not provider_available:
         return "skipped_no_provider"
     # round-38A: 선언 image_count가 실제 로컬 수보다 작아도 OCR 실패가 있으면 done 금지.
-    if done == expected_images and failed == 0:
+    # R47: 여기 오면 local_images >= expected_images다. 비교 대상을 신고 수가 아니라 실제
+    # 받은 수로 둔다 — 신고 2·실제 3·3장 성공이 `done(3) == expected(2)` 거짓으로 partial이
+    # 나오던 결함.
+    if done == local_images and failed == 0:
         return "done"
     if done == 0 and partial == 0:
         return "failed"
@@ -87,7 +92,8 @@ def enrich_ocr(result: dict) -> dict:
 
     새 dict를 반환한다(원본 `result`는 mutate하지 않는다). 반환 dict는 입력과
     동일한 키 구조를 유지하되 `ocr_text`(list)와 `meta.ocr_label`/`meta.ocr_provider`만
-    갱신된다.
+    갱신된다. R47: 실패한 이미지가 있으면 `meta.ocr_errors`
+    (`[{"media_path", "reason", "attempts": [{"provider", "reason"}]}]`)가 더해진다.
 
     `ocr_text` 스키마: `[{"media_path": str, "text": str, "model": str}, ...]`
     (provenance 보존 — 어느 이미지에서 어느 모델로 나온 텍스트인지 추적 가능, §12.5).
@@ -131,11 +137,13 @@ def enrich_ocr(result: dict) -> dict:
         meta["ocr_provider"] = None
         return {**result, "ocr_text": [], "meta": meta}
 
+    _ocr_ensemble.reset_wait_budget()  # R47: 쿨다운 대기 예산은 게시물 단위
     ocr_text: list[dict] = []
     provider_name: str | None = None
     done_count = 0
     partial_count = 0  # round-36 F4: 절단(truncated)돼 done_count에 안 세인 이미지 수
     failed_count = 0   # round-38A: 기존 OcrError·미지 예외 모두 거짓 done 방지에 반영
+    ocr_errors: list[dict] = []  # R47: 실패 이미지별 원인(실패가 있을 때만 meta에 싣는다)
 
     for media_path in existing_image_paths:
         path_obj = Path(media_path)
@@ -145,11 +153,13 @@ def enrich_ocr(result: dict) -> dict:
         except llm_free.OcrError as e:
             _log.warning("OCR 실패: %s (%s)", media_path, e)
             failed_count += 1
+            ocr_errors.append(_ocr_error_entry(media_path, e))
             continue
-        except Exception:
+        except Exception as e:
             # round-38A: 미래의 비정규화 예외도 이미지 단위로 fail-open하되 traceback을 보존.
             _log.exception("OCR 예기치 않은 예외(이미지 skip): %s", media_path)
             failed_count += 1
+            ocr_errors.append(_ocr_error_entry(media_path, e))
             continue
         is_partial = bool(ocr_result.get("partial"))
         item = {
@@ -175,8 +185,19 @@ def enrich_ocr(result: dict) -> dict:
         failed=failed_count,
     )
     meta["ocr_provider"] = provider_name
+    if ocr_errors:
+        meta["ocr_errors"] = ocr_errors
 
     return {**result, "ocr_text": ocr_text, "meta": meta}
+
+
+def _ocr_error_entry(media_path: str, exc: BaseException) -> dict:
+    """R47: `meta.ocr_errors` 항목 — 실패 원인 분류와 프로바이더별 시도 원인."""
+    return {
+        "media_path": media_path,
+        "reason": _ocr_ensemble.classify_failure(exc),
+        "attempts": list(getattr(exc, "attempts", None) or []),
+    }
 
 
 def _transcribe_label(*, tool_available: bool, total_sources: int, done: int) -> TranscribeLabel:
@@ -225,6 +246,10 @@ def enrich_transcribe(
     전사 backend(local/Groq 둘 다)가 없으면 API를 호출하지 않고
     `meta.transcript_label = "skipped_no_tool"`로 정직하게 표기한다(막지 않고
     degrade, §10).
+
+    R46: `meta.content_primary == "visual"`(라우터가 tiktok·instagram·facebook에 붙임)이면
+    오디오를 배경음으로 보고 전사하지 않는다 — `transcript_label="skipped_ambient_audio"`,
+    경로는 `meta.ambient_audio_paths`.
     """
     if result.get("transcript"):
         # 어댑터가 이미 자체 전사를 채운 경우(예: youtube with_transcript=True) —
@@ -254,6 +279,16 @@ def enrich_transcribe(
         meta["transcript_model"] = None
         meta["transcript_backend"] = None
         meta["transcript_sources"] = []
+        return {**result, "transcript": None, "meta": meta}
+
+    if meta.get("content_primary") == "visual":
+        # R46: 이미지·카드뉴스 게시물에 딸려 온 오디오(TikTok 사진 게시물 배경음 MP3)는
+        # 콘텐츠가 아니다 — 전사하지 않고 경로만 남긴다. media_paths는 그대로 둔다.
+        meta["transcript_label"] = "skipped_ambient_audio"
+        meta["transcript_model"] = None
+        meta["transcript_backend"] = None
+        meta["transcript_sources"] = []
+        meta["ambient_audio_paths"] = av_paths
         return {**result, "transcript": None, "meta": meta}
 
     tool_available = _transcribe.is_available()

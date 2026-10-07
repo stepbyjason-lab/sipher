@@ -448,6 +448,7 @@ def _item_shape(p: dict) -> dict:
         "reply_count": p.get("reply_count", 0),
         "media_paths": p.get("downloaded") or [],
         "text_blocks": list(p.get("text_blocks") or []),
+        "created_at_utc": _created_at_utc(p),
     }
 
 
@@ -474,6 +475,20 @@ def _taken_at_value(post: dict) -> float | None:
     else:
         return None
     return value if math.isfinite(value) else None      # NaN·±무한 배제
+
+
+def _created_at_utc(post: dict | None) -> str | None:
+    """raw `taken_at` → 원 게시 시각 ISO 8601 UTC 문자열, 판정 불가면 None(R48).
+
+    0 이하 epoch는 파서 기본값일 수 있어 미상으로 본다. 수집 시각으로 대신 채우지 않는다.
+    """
+    value = _taken_at_value(post or {})
+    if value is None or value <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+    except (OverflowError, OSError, ValueError):          # datetime 범위 밖
+        return None
 
 
 def _ordered_by_taken_at(posts: list[dict]) -> list[dict]:
@@ -583,6 +598,7 @@ def normalize(posts: list[dict], *, source: str, author: str, code: str,
             "author": author,
             "code": code,
             "post_id": (root or {}).get("id"),
+            "created_at_utc": _created_at_utc(root),
             "likes": (root or {}).get("likes", 0),
             "reply_count": (root or {}).get("reply_count", 0),
             "comment_count_captured": len(comments),

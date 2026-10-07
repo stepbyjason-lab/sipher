@@ -75,6 +75,19 @@ def probe(canonical_url: str, *, timeout: int = _PROBE_TIMEOUT) -> dict:
     return data
 
 
+def _ensure_dir(media_dir: Path) -> bool:
+    """R47(R38-D): 폴더 생성 실패(같은 이름 파일·읽기전용·디스크 꽉 참)를 다운로드 실패로 낮춘다.
+
+    예외로 올리면 `probe()`로 이미 받은 제목·본문·챕터까지 fetch 전체와 함께 사라진다.
+    """
+    try:
+        media_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        _log.warning("미디어 폴더 생성 실패 — 다운로드 생략 %s — %s", media_dir, e)
+        return False
+    return True
+
+
 def download(canonical_url: str, video_id: str, media_dir: str | Path, *,
              from_start: bool = False, with_video: bool = True,
              with_subs: bool = True, sub_langs: str = "ko,en",
@@ -87,7 +100,8 @@ def download(canonical_url: str, video_id: str, media_dir: str | Path, *,
     반환: {"videos": [Path], "subtitle_paths": [Path], "ok": bool}.
     """
     media_dir = Path(media_dir)
-    media_dir.mkdir(parents=True, exist_ok=True)
+    if not _ensure_dir(media_dir):
+        return {"videos": [], "subtitle_paths": [], "ok": False}
     out_tmpl = str(media_dir / "%(id)s.%(ext)s")
 
     args = ["--no-playlist", "--no-warnings", "-o", out_tmpl,
@@ -122,7 +136,8 @@ def download_live_chat(canonical_url: str, video_id: str, media_dir: str | Path,
     반환: {"path": Path|None, "status": "ok"|"failed"}.
     """
     media_dir = Path(media_dir)
-    media_dir.mkdir(parents=True, exist_ok=True)
+    if not _ensure_dir(media_dir):
+        return {"path": None, "status": "failed"}
     out_tmpl = str(media_dir / "%(id)s.%(ext)s")
     args = ["--no-playlist", "--no-warnings", "--skip-download", "-o", out_tmpl,
             "--write-subs", "--sub-langs", "live_chat", "--", canonical_url]

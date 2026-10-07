@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -189,7 +190,10 @@ class _ProviderState:
 # provider명 -> _ProviderState. 모듈 전역(프로세스 로컬), time.monotonic 기준.
 _states: dict[str, _ProviderState] = {}
 
-# 배치 누적 재시도-대기 시간(초). OCR_MAX_TOTAL_WAIT 초과 시 이후 대기 없이 skip만.
+# 누적 재시도-대기 시간(초). OCR_MAX_TOTAL_WAIT 초과 시 이후 대기 없이 skip만.
+# R47: 스코프는 게시물 하나 — `enrich_ocr`이 시작할 때 `reset_wait_budget()`으로 0으로 돌린다.
+# 이전엔 프로세스 수명 내내 누적돼 한 번 상한에 닿으면 쿨다운 재시도가 영구히 꺼졌다.
+# (쿨다운·강등 상태 `_states`는 실제 provider 상태라 프로세스 단위로 그대로 둔다.)
 _total_wait_used: float = 0.0
 
 # 유료 동의 상태: None=미질문, True/False=답변 캐시(프로세스당 1회 질문)
@@ -198,6 +202,12 @@ _paid_consent: bool | None = None
 # 테스트에서 주입 가능하도록 time/sleep을 모듈 레벨 훅으로 노출한다.
 _now = time.monotonic
 _sleep = time.sleep
+
+
+def reset_wait_budget() -> None:
+    """게시물 하나의 OCR을 시작할 때 누적 대기 예산을 다시 채운다(R47)."""
+    global _total_wait_used
+    _total_wait_used = 0.0
 
 
 def _state(name: str) -> _ProviderState:
@@ -563,6 +573,35 @@ def _max_total_wait() -> float:
         return 600.0
 
 
+# R47: 유료 동의 질문의 응답 대기 상한(초). 비대화형 배치에 pseudo-TTY가 붙어 `isatty()`가
+# True여도 아무도 안 치는 입력을 영원히 기다리지 않는다 — 시간이 지나면 거절(무료 실패 유지).
+_PAID_CONSENT_TIMEOUT = 60.0
+
+
+def _timed_input(prompt: str, timeout: float) -> str:
+    """`input()`을 데몬 스레드에서 돌려 `timeout`초까지만 기다린다. 무응답·EOF는 빈 문자열.
+
+    Windows 콘솔엔 stdin `select`가 없어 스레드로 끊는다.
+    ponytail: 시간 초과 뒤 스레드는 stdin 읽기에 남는다(데몬이라 종료는 안 막음). 답이 캐시돼
+    다시 묻지 않으므로 그 스레드가 나중 입력 한 줄을 삼켜도 이 모듈엔 영향이 없다.
+    """
+    box: list[str] = []
+
+    def _read() -> None:
+        try:
+            box.append(input(prompt))
+        except Exception:  # EOFError·닫힌 stdin 등 — 무응답과 같게 거절로 본다
+            pass
+
+    t = threading.Thread(target=_read, daemon=True)
+    t.start()
+    t.join(timeout)
+    if not box:
+        _log.warning("유료 OCR 동의 질문에 %.0f초 안에 응답 없음 — 거절로 처리", timeout)
+        return ""
+    return box[0]
+
+
 def _ask_paid_consent() -> bool:
     """전 무료 소진 시 유료 Claude 전환 여부. env 설정 > TTY 1회 질문 > 기본 거절."""
     global _paid_consent
@@ -573,11 +612,9 @@ def _ask_paid_consent() -> bool:
     if not sys.stdin.isatty():
         _paid_consent = False
         return False
-    try:
-        ans = input("[sipher] 무료 OCR provider가 모두 소진되었습니다. "
-                    "Claude(유료, ANTHROPIC_API_KEY)로 진행할까요? [y/N/always] ").strip().lower()
-    except EOFError:
-        ans = ""
+    ans = _timed_input("[sipher] 무료 OCR provider가 모두 소진되었습니다. "
+                       "Claude(유료, ANTHROPIC_API_KEY)로 진행할까요? [y/N/always] ",
+                       _PAID_CONSENT_TIMEOUT).strip().lower()
     if ans == "always":
         try:  # append-only — 기존 내용 보존(.env.local, gitignore)
             with (_ROOT / ".env.local").open("a", encoding="utf-8") as f:
@@ -590,8 +627,51 @@ def _ask_paid_consent() -> bool:
     return _paid_consent
 
 
+# R47: OCR 실패 원인 분류 — 출력 `meta.ocr_errors[].reason`·`attempts[].reason` 값.
+_HTTP_STATUS = re.compile(r"HTTP (\d{3})")
+
+
+def classify_failure(exc: BaseException) -> str:
+    """OCR 실패 예외를 원인 하나로 분류한다(타임아웃·5xx·잘못된 JSON·rate-limit 등).
+
+    provider 호출부가 원인을 `raise OcrError(...) from <원인>`과 `HTTP <코드>` 문구로
+    남기므로 그 둘을 읽는다. 앙상블 집계 실패는 `_ocr_error`가 붙인 `reason`을 쓴다.
+    """
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, str):
+        return reason
+    if isinstance(exc, _RateLimited):
+        return "rate_limited"
+    if isinstance(exc, _QuotaExhausted):
+        return "quota_exhausted"
+    if isinstance(exc, _EmptyResponse):
+        return "empty_response"
+    if not isinstance(exc, OcrError):
+        return "unexpected"
+    cause = exc.__cause__
+    if isinstance(cause, requests.exceptions.Timeout):
+        return "timeout"
+    if isinstance(cause, ValueError):  # JSONDecodeError(requests 것 포함)
+        return "bad_json"
+    if isinstance(cause, (KeyError, IndexError, TypeError, AttributeError)):
+        return "bad_response"
+    if isinstance(cause, requests.exceptions.RequestException):
+        return "network"
+    m = _HTTP_STATUS.search(str(exc))
+    if m:
+        return "http_5xx" if m.group(1).startswith("5") else "http_4xx"
+    return "other"
+
+
+def _ocr_error(msg: str, reason: str) -> OcrError:
+    e = OcrError(msg)
+    e.reason = reason
+    return e
+
+
 def _call_with_pacing(name: str, call, image_path: Path,
-                      counted: set[str] | None = None) -> tuple[str, bool]:
+                      counted: set[str] | None = None,
+                      attempts: list[dict] | None = None) -> tuple[str, bool]:
     """provider `name` 호출 직전에 페이싱을 적용하고, 성공/429 결과를 상태에 반영한다.
 
     `counted`는 이번 이미지 호출 스코프의 "실패 이미 카운트됨" 가드 집합 —
@@ -599,21 +679,26 @@ def _call_with_pacing(name: str, call, image_path: Path,
 
     round-36 F4: `call`은 `(text, truncated)`를 반환한다(신호 전파 접근 A).
     `_looks_empty`는 `text` 부분만 검사한다 — truncated는 빈 응답 판정과 무관.
+
+    R47: `attempts`(이미지 1장 스코프)에 실패한 호출마다 `{"provider", "reason"}`을
+    남긴다 — writer·judge가 모두 이 함수를 지나므로 한 곳에서 기록한다.
     """
     _pace(_rate_limit_key(name))
     try:
         text, truncated = call(image_path)
-    except _RateLimited as e:
-        _cool_down(name, getattr(e, "retry_after", None), counted)
+        # round-35 P1#3: 유효성 검사를 _record_success보다 먼저 — 이전엔 빈 응답도 여기서
+        # 먼저 success로 기록돼 실패 카운터가 리셋됐다(게이트 실측: consecutive_429_failures
+        # 2→0). candidate·judge 호출 전부 이 경로를 공유하므로 한 곳에서 막는다.
+        if _looks_empty(text):
+            raise _EmptyResponse(f"{name}: 빈/거부 응답")
+    except Exception as e:
+        if attempts is not None:
+            attempts.append({"provider": name, "reason": classify_failure(e)})
+        if isinstance(e, _RateLimited):
+            _cool_down(name, getattr(e, "retry_after", None), counted)
+        elif isinstance(e, _QuotaExhausted):
+            _demote_permanently(name)
         raise
-    except _QuotaExhausted:
-        _demote_permanently(name)
-        raise
-    # round-35 P1#3: 유효성 검사를 _record_success보다 먼저 — 이전엔 빈 응답도 여기서
-    # 먼저 success로 기록돼 실패 카운터가 리셋됐다(게이트 실측: consecutive_429_failures
-    # 2→0). candidate·judge 호출 전부 이 경로를 공유하므로 한 곳에서 막는다.
-    if _looks_empty(text):
-        raise _EmptyResponse(f"{name}: 빈/거부 응답")
     _record_success(name)
     return text, truncated
 
@@ -621,6 +706,7 @@ def _call_with_pacing(name: str, call, image_path: Path,
 def _collect_candidates(
     registry: list[tuple[str, object]], image_path: Path, *,
     counted: set[str] | None = None,
+    attempts: list[dict] | None = None,
 ) -> tuple[list[tuple[str, str, bool]], bool]:
     """registry를 순회해 첫 유효 후보 하나를 수집한다.
 
@@ -637,7 +723,7 @@ def _collect_candidates(
         if _is_skippable(name):
             continue
         try:
-            text, truncated = _call_with_pacing(name, call, image_path, counted)
+            text, truncated = _call_with_pacing(name, call, image_path, counted, attempts)
         except _RateLimited:
             rate_limited_now = True  # 쿨다운 진입(상태는 _call_with_pacing이 이미 반영)
             _log.info("OCR provider %s 일시 rate-limit — 이번 시도 skip(쿨다운 대기)", name)
@@ -663,6 +749,20 @@ def _collect_candidates(
 # ── 메인 진입점 ──────────────────────────────────────────────────────────────
 
 def ocr_image_ensemble(path: str | Path) -> dict:
+    """이미지 → {"text","model","mode"}. 동작 문서는 `_ocr_image_ensemble` 참조.
+
+    R47: 실패하면 올라가는 `OcrError`에 `attempts`(프로바이더별 실패 원인 목록)를 붙인다 —
+    `core/normalize.py`가 `meta.ocr_errors`로 내보낸다.
+    """
+    attempts: list[dict] = []
+    try:
+        return _ocr_image_ensemble(path, attempts)
+    except OcrError as e:
+        e.attempts = attempts
+        raise
+
+
+def _ocr_image_ensemble(path: str | Path, attempts: list[dict]) -> dict:
     """이미지 → {"text","model","mode"}. 사다리 문서는 모듈 docstring 참조.
 
     성공 `model`은 `ensemble(writer=<설정항목>,judge=<설정항목>)`으로 두 역할을
@@ -672,8 +772,8 @@ def ocr_image_ensemble(path: str | Path) -> dict:
     최대 1회 재시도·대기를 내장한 블로킹 함수**다. 후보가 0개이고 cooling 중인
     provider가 있으며 그 잔여 쿨다운이 `image_max_wait`(기본 90s) 이하이면, 그
     잔여 시간만큼 `time.sleep`(주입 가능)으로 대기한 뒤 후보 수집을 1회만
-    재시도한다. 이미지당 재시도는 최대 1회, 배치 전체 누적 대기는
-    `OCR_MAX_TOTAL_WAIT`(기본 600s)를 넘지 않는다 — 넘으면 이후 이미지는 대기
+    재시도한다. 이미지당 재시도는 최대 1회, 게시물 하나의 누적 대기는(R47 — `enrich_ocr`이
+    시작할 때 `reset_wait_budget()`) `OCR_MAX_TOTAL_WAIT`(기본 600s)를 넘지 않는다 — 넘으면 이후 이미지는 대기
     없이 기존 skip 동작만 한다(재시도 소진 시 예외가 전파되면 `core/normalize.py`의
     기존 `except OcrError: continue`가 그대로 처리한다).
 
@@ -684,7 +784,7 @@ def ocr_image_ensemble(path: str | Path) -> dict:
 
     image_path = Path(path)
     if not image_path.exists():
-        raise OcrError(f"이미지 파일이 없습니다: {image_path}")
+        raise _ocr_error(f"이미지 파일이 없습니다: {image_path}", "file_missing")
 
     # 이미지당 실패-카운트 가드(CORR-1): 이 호출(=이미지 1장) 안에서 초기 수집·1-b
     # 재시도·judge 429를 모두 맞아도 provider별 consecutive_429_failures는 +1만.
@@ -693,7 +793,7 @@ def ocr_image_ensemble(path: str | Path) -> dict:
     # 1) 후보 수집(1차). cooling/demoted provider는 대기 없이 skip.
     registry = _candidate_providers()
     candidates, _rate_limited_now = _collect_candidates(
-        registry, image_path, counted=counted_this_image)
+        registry, image_path, counted=counted_this_image, attempts=attempts)
 
     # 1-b) 후보 0개 & cooling 중인 provider가 있고, 그 잔여 시간이 image_max_wait
     #      이내면, 배치 누적 대기 상한(OCR_MAX_TOTAL_WAIT) 안에서 1회만 대기 후 재시도.
@@ -716,7 +816,7 @@ def ocr_image_ensemble(path: str | Path) -> dict:
                 _sleep(wait_needed)
                 _total_wait_used += wait_needed
                 candidates, _retry_rate_limited = _collect_candidates(
-                    registry, image_path, counted=counted_this_image)
+                    registry, image_path, counted=counted_this_image, attempts=attempts)
                 _rate_limited_now = _rate_limited_now or _retry_rate_limited
             elif wait_needed > image_max_wait:
                 _log.info(
@@ -734,18 +834,28 @@ def ocr_image_ensemble(path: str | Path) -> dict:
     # 기존 유료 opt-in은 writer로만 유지하고, R44부터 그 결과도 같은 judge를 거친다.
     if (not candidates and registry and all_writers_demoted and
             _ask_paid_consent() and _anthropic_key()):
+        # R47 F47-003: 모델이 없으면 유료 호출에 도달하지 않는다 — 시도로 기록하지 않고
+        # 이미지 단위 reason(`writer_failed`)으로만 드러낸다.
+        configured_paid_model = _env().get("CLAUDE_OCR_MODEL", "").strip()
+        if not configured_paid_model:
+            raise _ocr_error("설정된 OCR writer 전부 소진/실패 — 유료 폴백 승인됐지만 "
+                             "CLAUDE_OCR_MODEL 미설정이라 유료 writer를 부르지 않음", "writer_failed")
+        # R47 F47-001: 유료 writer는 `_call_with_pacing`을 거치지 않으므로 실패를 여기서 기록한다.
+        paid_name = f"writer:paid:{configured_paid_model}"
         try:
             from .lang import resolve_lang
             paid_text, paid_model, paid_truncated = _call_claude(
                 image_path, prompt=_build_writer_prompt(resolve_lang()))
             if _looks_empty(paid_text):
-                raise OcrError("유료 OCR writer 빈/거부 응답")
+                raise _ocr_error("유료 OCR writer 빈/거부 응답", "empty_response")
             candidates = [(f"writer:paid:{paid_model}", paid_text, paid_truncated)]
-        except OcrError:
+        except OcrError as e:
+            attempts.append({"provider": paid_name, "reason": classify_failure(e)})
             raise
         except Exception as e:
+            attempts.append({"provider": paid_name, "reason": classify_failure(e)})
             _log.exception("유료 OCR writer 예기치 않은 실패")
-            raise OcrError("유료 OCR writer 예기치 않은 실패") from e
+            raise _ocr_error("유료 OCR writer 예기치 않은 실패", "unexpected") from e
 
     # 2) writer가 만든 후보는 개수와 무관하게 반드시 설정된 judge를 거친다.
     if candidates:
@@ -770,7 +880,7 @@ def ocr_image_ensemble(path: str | Path) -> dict:
             try:
                 text, judge_truncated = _call_with_pacing(
                     state_name, _roster_call(provider, model, judge_prompt),
-                    image_path, counted_this_image)
+                    image_path, counted_this_image, attempts)
             except _RateLimited:
                 _log.info("judge %s 일시 rate-limit — 다음 judge(쿨다운 반영됨)", item)
                 continue
@@ -798,7 +908,8 @@ def ocr_image_ensemble(path: str | Path) -> dict:
             if judge_truncated:
                 result["partial"] = True
             return result
-        raise OcrError("OCR judge 전부 실패 — 검증되지 않은 writer 결과를 반환하지 않음")
+        raise _ocr_error("OCR judge 전부 실패 — 검증되지 않은 writer 결과를 반환하지 않음",
+                         "judge_failed")
 
     # 3) writer 후보 0개.
     #    - 일시 rate-limit/cooling 때문(무료 provider가 전부 demoted는 아님) → 유료로
@@ -811,5 +922,6 @@ def ocr_image_ensemble(path: str | Path) -> dict:
         # 일반실패)을 _RateLimited로 오분류하지 않는다 — 게이트 실측: 429가 전혀 없는데도
         # "부활 대기"로 이미지가 영구 skip되던 결함. "부활"을 기다릴 이유가 없는 실패이므로
         # 정직하게 실패로 알린다.
-        raise OcrError("무료 OCR provider 전부 빈/거부/실패 응답(rate-limit 관측 없음)")
-    raise OcrError("설정된 OCR writer 전부 소진/실패")
+        raise _ocr_error("무료 OCR provider 전부 빈/거부/실패 응답(rate-limit 관측 없음)",
+                         "writer_failed")
+    raise _ocr_error("설정된 OCR writer 전부 소진/실패", "writer_failed")

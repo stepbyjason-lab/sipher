@@ -14,11 +14,12 @@
 | [`threads/`](threads/) | [vdite/threads-scraper](https://github.com/vdite/threads-scraper) fork(vendored, MIT) — [우리 fork](https://github.com/stepbyjason-lab/threads-scraper) | 기본은 fast 원글 작성자 수집 + rich-text·후속글 보존. `author_thread[]`는 출처 시각이 있을 때 원글 작성자의 게시 시간순이며, continuation은 stderr progress와 45초 예산 뒤 `partial` 결과를 제공. 타인 댓글은 `--all-comments`, 조건부 deep은 `--auto`, 전체 reply tree는 `--deep` | 구현+라이브 검증(round-02 Gate5 PASS_WITH_FOLLOWUPS) |
 | [`instagram/`](instagram/) | vendored 없음 — [instaloader/instaloader](https://github.com/instaloader/instaloader)(pip, MIT) 직접 호출 | 캡션·미디어·메타 + **로그인 세션 사실상 필수**(round-10 정정, IG가 익명 접근을 거의 항상 403 차단) + `InstagramAccessError.access_label`로 정직 판별 | 구현(round-09) → 로그인 필수 재포지셔닝(round-10 §④) |
 | [`tiktok/`](tiktok/) | vendored 없음 — [mikf/gallery-dl](https://github.com/mikf/gallery-dl)(pip, **GPL-2.0**) subprocess 직접 호출(경계라 전파 없음, §라이선스 원칙 참조) | 캡션(desc)+통계+메타, 영상 다운로드 opt-in | 구현+라이브 검증(round-09) → 라이선스 표기 보완(round-10 §⑤) |
-| [`web/`](web/) | `web/engine/`만 vendored — [fivetaku/insane-search](https://github.com/fivetaku/insane-search)(MIT) | 6플랫폼 host 미매칭 시 **범용 폴백**. Tier1(curl_cffi WAF 그리드, engine 내장 SSRF 방어) + Tier2(Python playwright JS-render, SSR 껍데기 의심 시 자동 승격) | 구현+라이브 검증(round-10) |
+| [`x/`](x/) | vendored 없음 — [mikf/gallery-dl](https://github.com/mikf/gallery-dl)(pip, **GPL-2.0**) subprocess 직접 호출(tiktok과 같은 방식) | 원글·저자 이어쓰기(`author_thread[]`)·인용 포스트(`quoted[]`, 아티클 제목·표지·이미지)·저자 대댓글·타인 답글(상한 `max_replies`, 기본 100)·영상/사진 원본. **로그인 쿠키 필수**(`X_COOKIES_FILE`, 없으면 `AuthRequired` 오류) | 구현+라이브 검증(로그인 쿠키) |
+| [`web/`](web/) | `web/engine/`만 vendored — [fivetaku/insane-search](https://github.com/fivetaku/insane-search)(MIT) | 7플랫폼 host 미매칭 시 **범용 폴백**. Tier1(curl_cffi WAF 그리드, engine 내장 SSRF 방어) + Tier2(Python playwright JS-render, SSR 껍데기 의심 시 자동 승격) | 구현+라이브 검증(round-10) |
 
 ## 공통 규약
 
-- **출력:** sipher 정규화 스키마 1종 — `{ source, platform, body_text, comments[], ocr_text[], transcript, media_paths[], meta }`
+- **출력:** sipher 정규화 스키마 1종 — `{ source, platform, body_text, comments[], ocr_text[], transcript, media_paths[], meta }` (threads·x는 `author_thread[]`, x는 `quoted[]`를 더 반환)
 - **경계:** 어댑터는 수집·정규화만. 노트 합성은 `note-factory`(다운스트림), 라우팅은 `sipher`.
 - **개발 절차:** 마디(`madi`) 게이트 준수 — 만들기 전(선행 설계 floor) → 만드는 중(구현 통제) → 만든 후(리뷰 수렴). 소스 변경은 Gate 4(Implementation Start) 승인 후.
 
@@ -35,7 +36,7 @@
 2. **pip 라이브러리 직접 호출(import 또는 subprocess)** — youtube
    ([yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp), Unlicense/MIT), instagram
    ([instaloader/instaloader](https://github.com/instaloader/instaloader), MIT),
-   tiktok([mikf/gallery-dl](https://github.com/mikf/gallery-dl), **GPL-2.0**).
+   tiktok·x([mikf/gallery-dl](https://github.com/mikf/gallery-dl), **GPL-2.0**).
    라이브러리 자체를 vendor하지 않으므로(사용자가 자기 pip 환경에 별도 설치)
    재배포 의무가 없다 — `requirements.txt`에 라이선스와 버전 핀만 명시하면
    충분하다. GPL 라이브러리라도 **subprocess(별도 프로세스) 호출은 동일

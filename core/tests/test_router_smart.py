@@ -387,6 +387,7 @@ _PLATFORM_URLS = {
     "facebook": "https://www.facebook.com/watch/?v=1",
     "youtube": "https://youtube.com/watch?v=abcdefghijk",
     "naver_blog": "https://blog.naver.com/x/1",
+    "x": "https://x.com/a/status/1",
 }
 
 

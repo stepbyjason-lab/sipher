@@ -2,7 +2,7 @@
 
 # Sipher
 
-> **Current public release: v0.1.6**
+> **Current public release: v0.1.7**
 
 **Throw any URL or file at it — get back clean, normalized content.**<br>
 **아무 URL이나 파일을 던지면 — 깨끗하게 정규화된 콘텐츠로 돌려줍니다.**
@@ -42,7 +42,7 @@ mis-picking) a different scraper every time.
 
 Sipher fixes that with **one rule: give it a URL, it routes to the right extractor.**
 
-- **One interface, every source.** 6 platforms + a generic web fallback + local files,
+- **One interface, every source.** 7 platforms + a generic web fallback + local files,
   all returning the *same* normalized shape.
 - **Deterministic-first, $0.** Typed text is read straight from the page (free).
   Text in images goes through a free vision-OCR ensemble. Audio/video goes through
@@ -84,8 +84,9 @@ credit card.
 | **Facebook** | Body, **full-size photos** (lightbox bypass + hidden `+N` shots), video, and **comment bodies** with honest confidence labels. |
 | **Instagram** | Caption, media, metadata. Login session required (Instagram blocks anonymous access) — reported honestly via access labels. |
 | **TikTok** | Caption, stats, metadata; optional video download. |
+| **X** | Post body, the author's own follow-up posts (`author_thread[]`), quoted posts (`quoted[]` — a quoted article comes with its title, cover and images), the author's replies and other users' replies (`comments[]`, each tagged `kind`), and original-resolution photos and video. **X login cookies required** (`X_COOKIES_FILE`, see "X login cookies" below) — without them you get an explicit `AuthRequired` error, never an empty success. `--max-replies N` (default 100) caps other users' replies only. |
 | **Naver Blog** | Mobile-API listing + body + metadata + original-resolution images. (Pure standard library — zero dependencies.) |
-| **Any web article** | Generic fallback for anything the 6 platforms don't cover. Two-tier: fast static fetch → JS-rendered browser when the page is an SSR shell. Built-in SSRF defense. |
+| **Any web article** | Generic fallback for anything the 7 platforms don't cover. Two-tier: fast static fetch → JS-rendered browser when the page is an SSR shell. Built-in SSRF defense. |
 | **Local files** | PDF / DOCX / PPTX / XLSX / CSV / images / audio / video → text, via document conversion + OCR + transcription. |
 
 ### Enrichment (opt-in)
@@ -98,6 +99,40 @@ credit card.
   fails, **auto-falls back to free Groq Whisper** — a machine with no GPU can still
   transcribe with just a Groq key.
 
+### Image-first posts: background music is not a transcript
+
+Photo posts, card-news and carousels on Instagram, Facebook and TikTok often carry
+background music. Sipher does not transcribe it: `transcript` stays `null`,
+`meta.transcript_label` is `skipped_ambient_audio`, and the audio files are listed in
+`meta.ambient_audio_paths`. These platforms also get `meta.content_primary`
+(`visual`, `mixed`, `spoken`, or `null` when the media count is unknown); only `visual`
+posts skip transcription.
+
+### OCR failures: `meta.ocr_errors`
+
+When OCR fails on one or more images, `meta.ocr_errors` lists each failed image:
+`media_path`, a `reason`, and `attempts` — one `{provider, reason}` entry per failed
+provider call (writers and judges, including the paid fallback if it was tried). The key
+is absent when no image failed. `reason` is one of `timeout`, `http_5xx`, `http_4xx`,
+`bad_json`, `bad_response`, `network`, `rate_limited`, `quota_exhausted`,
+`empty_response`, `writer_failed`, `judge_failed`, `file_missing`, `unexpected`,
+`other`. `meta.ocr_label` is `done` only when every downloaded image succeeded — even if
+the adapter declared fewer images than it actually downloaded.
+
+### When part of a fetch fails
+
+A failure in one step does not discard what was already collected:
+
+- **YouTube** — if the media folder cannot be created, the title, description and
+  chapters are still returned and `meta.video_label` (and `meta.chat_label` when chat was
+  requested) is `download_failed`.
+- **OCR wait budget** — waiting out a rate-limit cool-down is capped by `OCR_MAX_TOTAL_WAIT`
+  (default 600 s) **per post**; the next post starts with a full budget.
+- **Paid-fallback prompt** — when every configured free writer is exhausted, an
+  interactive terminal is asked once whether to use the paid fallback. No answer within
+  60 seconds counts as "no" and the fetch moves on; the question is not repeated in the
+  same process.
+
 ### Threads progress and partial results
 
 Threads progress events are emitted as JSON Lines on **stderr**; stdout stays the final
@@ -108,6 +143,13 @@ and collected author follow-ups are valid, while `partial_reason` and
 
 Python callers can pass `progress=callback` to `core.fetch()` or
 `adapters.threads.fetch()` to receive the same lifecycle event dictionaries directly.
+
+### Threads posting time
+
+The Threads result carries each post's original posting time as `created_at_utc`
+(ISO 8601 UTC, e.g. `2025-08-28T03:12:45+00:00`) in the root `meta`, in every
+`author_thread[]` item and in every comment. It is `null` when the source gives no time —
+it is never filled with `fetched_at`, which is the time sipher collected the page.
 
 ### Threads root-author order
 
@@ -131,6 +173,7 @@ runs underneath — and what the author wrote from scratch vs. open source:
 | **Facebook** | **Written by the author** | Lightbox-bypass full-size photos, hidden `+N` shots, comment collection — built from scratch because no public alternative exists |
 | **Instagram** | [instaloader](https://github.com/instaloader/instaloader) (MIT) | Direct library calls + our honest access-label layer |
 | **TikTok** | [gallery-dl](https://github.com/mikf/gallery-dl) (GPL-2.0) | Called across a subprocess boundary (no code linkage) |
+| **X** | [gallery-dl](https://github.com/mikf/gallery-dl) (GPL-2.0) | Called across a subprocess boundary, same as TikTok. Splitting the conversation into body / author thread / quoted posts / replies, the reply cap and the cookie-error handling are ours |
 | **Naver Blog** | **Written by the author** | Pure standard library (zero deps) — mobile API + original-resolution images |
 | **Generic web** | [fivetaku/insane-search](https://github.com/fivetaku/insane-search) engine (MIT, vendored unmodified) | Tier 1 (WAF grid, SSRF defense) is the engine as-is. Tier 2 JS-render and auto-escalation are ours |
 
@@ -147,7 +190,7 @@ One normalized schema, no matter the source:
 ```json
 {
   "source": "...",
-  "platform": "threads | youtube | facebook | instagram | tiktok | naver_blog | web | local",
+  "platform": "threads | youtube | facebook | instagram | tiktok | naver_blog | x | web | local",
   "body_text": "...",
   "comments": [ { "author": "...", "text": "...", "likes": 0 } ],
   "ocr_text": [ { "media_path": "...", "text": "..." } ],
@@ -156,6 +199,11 @@ One normalized schema, no matter the source:
   "meta": { "...": "honest labels + platform metadata" }
 }
 ```
+
+Some platforms add keys to this shape: Threads and X return `author_thread[]` (the
+author's own follow-up posts), and X also returns `quoted[]` (quoted posts) — see
+`adapters/x/docs/00-overview.md` for the X fields, including `meta.media_files`
+(downloaded files with their measured `width`/`height`).
 
 Human-readable Markdown is the default; add `--json` for the machine shape,
 `--out FILE` to write to disk.
@@ -182,10 +230,33 @@ scripts/setup.ps1 -Profile lite  # PowerShell
 | Profile | Adapters | For |
 |---|---|---|
 | **LITE** | core + Naver Blog + YouTube + TikTok + web | Public content + free OCR & transcription (Groq key, no GPU needed). No personal login sessions — easy to share. |
-| **FULL** | LITE + Threads + Facebook + Instagram + Whisper | Needs browser login sessions / GPU. Personal use. |
+| **FULL** | LITE + Threads + Facebook + Instagram + X + Whisper | Needs browser login sessions (X: your login cookies) / GPU. Personal use. |
 
 See **[docs/08-packaging.md](docs/08-packaging.md)** for the full dependency matrix,
-system requirements (ffmpeg, Whisper, Playwright browsers), and API keys.
+system requirements (ffmpeg, optional ffprobe, Whisper, Playwright browsers), and API keys.
+
+### X login cookies
+
+X only serves a conversation to a logged-in session, so the X adapter needs your cookies.
+Export them from a browser logged in to x.com as a **Netscape-format** `cookies.txt`, then
+point sipher at the file in `.env.local` (or an environment variable of the same name;
+relative paths resolve from the repo root):
+
+```bash
+# .env.local
+X_COOKIES_FILE=/path/to/x_cookies.txt
+```
+
+```bash
+python -m core fetch "https://x.com/someone/status/XXXX" --json
+```
+
+The cookie file is your login session — keep it outside the repo and never commit it. If
+`X_COOKIES_FILE` is unset, points to a missing file, or the cookies have expired, the fetch
+ends with an `AuthRequired` error. X downloads use `gallery-dl` (already installed with the
+LITE profile); a system `ffprobe`, if present, measures the real size of downloaded media
+(`meta.media_files[].size_source` is `probe`; without it, X's declared size is used and
+`size_source` is `sidecar`).
 
 ---
 

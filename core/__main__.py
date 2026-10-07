@@ -22,6 +22,7 @@ fetch : 어떤 지원 플랫폼 URL이든, 또는 존재하는 로컬 파일 경
   --deep            (threads) fast pass 생략, 재귀 크롤부터
   --auto            (threads) fast pass 불완전 시 자동 deep 승격
   --max-pages N     (threads) deep 크롤 최대 페이지 수
+  --max-replies N   (x) 타인 답글 상한(기본 100) — 저자 이어쓰기·저자 대댓글은 자르지 않음
   --from-start      (youtube) 라이브를 처음부터
   --smart/--no-smart smart 전량추출(기본 ON). URL만 넣으면 플랫폼별 미디어 다운로드,
                     OCR, 전사, 첫댓글(지원 플랫폼)을 자동 시도한다.
@@ -42,7 +43,12 @@ facebook 인증/옵션 (facebook):
   --no-headless           headful로 브라우저 실행(기본: headless)
   --no-video              영상(T4) 보강 생략(기본: 영상 포함)
 
-web 옵션 (범용 폴백, 6플랫폼 host 미매칭 http(s) URL 대상 — round-10):
+X 인증 (x):
+  X 포스트는 로그인 쿠키가 필요하다. x.com 로그인 세션의 쿠키 파일(넷스케이프 형식) 경로를
+  .env.local 또는 환경변수 X_COOKIES_FILE에 적는다. 미설정·파일 없음·만료이면 빈 결과가
+  아니라 AuthRequired 오류로 끝난다.
+
+web 옵션 (범용 폴백, 7플랫폼 host 미매칭 http(s) URL 대상 — round-10):
   --js auto|true|false    auto(기본, SSR 껍데기 의심 시 자동 JS 렌더 승격)/
                           true(항상 JS 렌더 강제)/false(정적 tier1만)
   --timeout N             tier1 요청 타임아웃 초(기본 25)
@@ -76,7 +82,14 @@ def _write_threads_progress(event: dict) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     # CLI help는 영어 우선 + 한국어 병기(round-21, 공개 대비).
-    ap = argparse.ArgumentParser(prog="sipher")
+    ap = argparse.ArgumentParser(
+        prog="sipher",
+        description=(
+            "Siphon any URL or file into normalized content. Supported: YouTube, Threads, Facebook, "
+            "Instagram, TikTok, Naver Blog, X (x.com / twitter.com), any other web page, local files "
+            "(아무 URL·파일을 정규화된 콘텐츠로. 지원: YouTube, Threads, Facebook, Instagram, TikTok, "
+            "네이버 블로그, X(x.com·twitter.com), 그 밖의 웹 페이지, 로컬 파일)."
+        ))
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="debug logging (debug 로그)")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -91,7 +104,12 @@ def main(argv: list[str] | None = None) -> int:
             "continuations were unresolved before the time budget. Read "
             "meta.author_thread.resolution.status and partial_reason "
             "(Threads 진행 event는 stderr JSON Lines, stdout은 최종 결과만 출력. partial은 root 수집 후 "
-            "continuation 일부가 시간 예산 안에 해소되지 않은 정상 결과이며 resolution.status/partial_reason을 확인)."
+            "continuation 일부가 시간 예산 안에 해소되지 않은 정상 결과이며 resolution.status/partial_reason을 확인). "
+            "X posts need your x.com login cookies: put the path of a Netscape-format cookie file in "
+            "X_COOKIES_FILE (.env.local or environment); without valid cookies the fetch ends with an "
+            "AuthRequired error, never an empty result "
+            "(X 포스트는 로그인 쿠키 필요 — 넷스케이프 형식 쿠키 파일 경로를 X_COOKIES_FILE에 설정, "
+            "없거나 만료되면 빈 결과가 아니라 AuthRequired 오류)."
         ))
     pf.add_argument("url", help="URL or local file path (URL 또는 로컬 파일 경로)")
     pf.add_argument("--json", action="store_true", dest="json_output",
@@ -115,6 +133,9 @@ def main(argv: list[str] | None = None) -> int:
                          "(기본은 원글 및 저자 연속글만 수집)")
     pf.add_argument("--max-pages", type=int, default=None, dest="max_pages",
                      help="(threads) deep-crawl page cap (deep 크롤 페이지 상한)")
+    pf.add_argument("--max-replies", type=int, default=None, dest="max_replies",
+                     help="(x) cap on other users' replies, default 100; author thread and "
+                          "author replies are never cut (타인 답글 상한, 저자 글은 자르지 않음)")
     pf.add_argument("--from-start", action="store_true", dest="from_start",
                      help="(youtube) capture a live stream from the beginning "
                           "(라이브를 처음부터)")
@@ -205,6 +226,8 @@ def main(argv: list[str] | None = None) -> int:
         kwargs["all_comments"] = True
     if args.max_pages is not None:
         kwargs["max_pages"] = args.max_pages
+    if args.max_replies is not None:
+        kwargs["max_replies"] = args.max_replies
     if args.from_start:
         kwargs["from_start"] = True
     if args.with_transcript:

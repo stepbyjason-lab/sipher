@@ -2,7 +2,7 @@
 
 # Sipher
 
-> **현재 공개 버전: v0.1.6**
+> **현재 공개 버전: v0.1.7**
 
 **아무 URL이나 파일을 던지면 — 깨끗하게 정규화된 콘텐츠로 돌려줍니다.**
 
@@ -34,7 +34,7 @@ python -m core fetch "https://www.threads.net/@someone/post/XXXX"
 
 Sipher는 **딱 하나의 규칙**으로 이걸 없앱니다: **URL만 주면 알맞은 추출기로 라우팅.**
 
-- **인터페이스 하나, 모든 소스.** 6개 플랫폼 + 범용 웹 폴백 + 로컬 파일이 전부
+- **인터페이스 하나, 모든 소스.** 7개 플랫폼 + 범용 웹 폴백 + 로컬 파일이 전부
   *같은* 정규화 구조로 나옵니다.
 - **deterministic-first, $0.** 타이핑된 글은 페이지에서 바로 읽고(무료), 이미지
   속 글은 무료 비전 OCR 앙상블, 음성/영상은 로컬 Whisper → 무료 Groq 폴백.
@@ -72,8 +72,9 @@ Sipher의 AI 보강은 **유료 키 없이 끝까지 돌아가도록** 설계됐
 | **Facebook** | 본문, **풀사이즈 사진**(라이트박스 우회 + 숨은 `+N`장), 영상, **댓글 본문**(정직한 신뢰도 라벨). |
 | **Instagram** | 캡션·미디어·메타. 로그인 세션 필요(익명 접근 차단) — access 라벨로 정직 보고. |
 | **TikTok** | 캡션·통계·메타, (옵션) 영상 다운로드. |
+| **X** | 원글 본문, 작성자가 이어 쓴 글(`author_thread[]`), 인용한 포스트(`quoted[]` — 인용 아티클은 제목·표지·이미지까지), 저자 대댓글과 타인 답글(`comments[]`, 항목마다 `kind` 표시), 원본 해상도 사진·영상. **X 로그인 쿠키 필수**(`X_COOKIES_FILE`, 아래 "X 로그인 쿠키" 참조) — 없으면 빈 성공이 아니라 `AuthRequired` 오류로 알립니다. `--max-replies N`(기본 100)은 타인 답글에만 상한을 겁니다. |
 | **네이버 블로그** | 모바일 API 목록 + 본문 + 메타 + 원본 해상도 이미지. (순수 표준 라이브러리 — 무의존.) |
-| **일반 웹 아티클** | 6개 플랫폼에 안 걸리는 모든 것의 범용 폴백. 2-tier: 빠른 정적 fetch → SSR 껍데기면 JS 렌더 브라우저. SSRF 방어 내장. |
+| **일반 웹 아티클** | 7개 플랫폼에 안 걸리는 모든 것의 범용 폴백. 2-tier: 빠른 정적 fetch → SSR 껍데기면 JS 렌더 브라우저. SSRF 방어 내장. |
 | **로컬 파일** | PDF/DOCX/PPTX/XLSX/CSV/이미지/음성/영상 → 문서 변환 + OCR + 전사로 텍스트화. |
 
 ### 보강 (opt-in)
@@ -84,6 +85,38 @@ Sipher의 AI 보강은 **유료 키 없이 끝까지 돌아가도록** 설계됐
 - `--transcribe` — 음성/영상 전사. 로컬 Whisper 우선, 없거나 실패하면 **무료 Groq
   Whisper로 자동 폴백** — GPU 없는 머신도 Groq 키 하나로 전사 가능.
 
+### 이미지가 주인 게시물: 배경음은 전사하지 않는다
+
+Instagram·Facebook·TikTok의 사진 게시물·카드뉴스·carousel에는 배경음이 깔려 있는 경우가
+많습니다. sipher는 이 배경음을 전사하지 않습니다. `transcript`는 `null`로 남고,
+`meta.transcript_label`은 `skipped_ambient_audio`이며, 오디오 파일 경로는
+`meta.ambient_audio_paths`에 따로 담깁니다. 이 세 플랫폼 결과에는 `meta.content_primary`
+(`visual`·`mixed`·`spoken`, 미디어 개수를 모르면 `null`)도 붙고, `visual`일 때만 전사를
+건너뜁니다.
+
+### OCR 실패 기록: `meta.ocr_errors`
+
+OCR이 실패한 이미지가 있으면 `meta.ocr_errors`에 실패한 이미지마다 `media_path`, 원인
+`reason`, 그리고 `attempts`가 담깁니다. `attempts`는 실패한 프로바이더 호출마다
+`{provider, reason}` 한 건씩이며, writer와 judge(시도했다면 유료 폴백 포함)가 모두
+들어갑니다. 실패한 이미지가 없으면 이 키는 없습니다. `reason`은 `timeout`·`http_5xx`·
+`http_4xx`·`bad_json`·`bad_response`·`network`·`rate_limited`·`quota_exhausted`·
+`empty_response`·`writer_failed`·`judge_failed`·`file_missing`·`unexpected`·`other` 중
+하나입니다. `meta.ocr_label`은 받은 이미지가 전부 성공했을 때만 `done`입니다 — 어댑터가
+신고한 이미지 수가 실제로 받은 수보다 적어도 같습니다.
+
+### 수집 일부가 실패할 때
+
+한 단계가 실패해도 이미 모은 데이터는 버리지 않습니다.
+
+- **YouTube** — 미디어 폴더를 만들지 못해도 제목·설명·챕터는 그대로 돌려주고,
+  `meta.video_label`(채팅을 요청했다면 `meta.chat_label`도)이 `download_failed`가 됩니다.
+- **OCR 대기 예산** — rate-limit 쿨다운을 기다리는 시간은 **게시물 하나당**
+  `OCR_MAX_TOTAL_WAIT`(기본 600초)까지입니다. 다음 게시물은 예산을 처음부터 다시 받습니다.
+- **유료 폴백 동의 질문** — 설정된 무료 writer가 모두 소진되면 대화형 터미널에서 유료
+  폴백을 쓸지 한 번 묻습니다. 60초 안에 답이 없으면 "아니오"로 보고 다음으로 넘어가며,
+  같은 프로세스에서는 다시 묻지 않습니다.
+
 ### Threads 진행 상태와 partial 결과
 
 Threads 진행 event는 **stderr** JSON Lines로 나오고 stdout에는 최종 Markdown 또는 JSON만
@@ -93,6 +126,13 @@ root와 확보된 원글 작성자 후속글은 유효하며, continuation 시�
 
 Python 호출자는 `core.fetch()` 또는 `adapters.threads.fetch()`에 `progress=callback`을 넘겨
 같은 lifecycle event dict를 직접 받을 수 있습니다.
+
+### Threads 게시 시각
+
+Threads 결과는 각 게시물의 원래 게시 시각을 `created_at_utc`(ISO 8601 UTC, 예:
+`2025-08-28T03:12:45+00:00`)로 담습니다. 위치는 root `meta`, 모든 `author_thread[]` 항목,
+모든 댓글입니다. 출처에 시각이 없으면 `null`이며, sipher가 페이지를 수집한 시각인
+`fetched_at`으로 대신 채우지 않습니다.
 
 ### Threads 원글 작성자 후속글 순서
 
@@ -114,6 +154,7 @@ Python 호출자는 `core.fetch()` 또는 `adapters.threads.fetch()`에 `progres
 | **Facebook** | **저자가 직접 제작** | 라이트박스 우회 풀사이즈 사진·숨은 `+N`장·댓글 수집 — 공개 대체재가 없어 직접 만듦 |
 | **Instagram** | [instaloader](https://github.com/instaloader/instaloader) (MIT) | 라이브러리 직접 호출 + 정직한 access 라벨 계층은 자체 |
 | **TikTok** | [gallery-dl](https://github.com/mikf/gallery-dl) (GPL-2.0) | subprocess 경계로 호출(코드 비결합) |
+| **X** | [gallery-dl](https://github.com/mikf/gallery-dl) (GPL-2.0) | TikTok과 같은 subprocess 경계 호출. 대화를 본문·저자 이어쓰기·인용 포스트·답글로 가르는 로직, 답글 상한, 쿠키 오류 처리는 자체 |
 | **네이버 블로그** | **저자가 직접 제작** | 순수 표준 라이브러리(무의존) — 모바일 API + 원본 해상도 이미지 |
 | **일반 웹** | [fivetaku/insane-search](https://github.com/fivetaku/insane-search) engine (MIT, 무수정 vendored) | Tier1(WAF 그리드·SSRF 방어)은 engine 그대로. Tier2 JS-render와 자동 승격은 자체 |
 
@@ -129,7 +170,7 @@ vendored 코드는 어댑터 폴더의 `_SOURCE.md`(출처·커밋 SHA·수정 �
 ```json
 {
   "source": "...",
-  "platform": "threads | youtube | facebook | instagram | tiktok | naver_blog | web | local",
+  "platform": "threads | youtube | facebook | instagram | tiktok | naver_blog | x | web | local",
   "body_text": "...",
   "comments": [ { "author": "...", "text": "...", "likes": 0 } ],
   "ocr_text": [ { "media_path": "...", "text": "..." } ],
@@ -138,6 +179,10 @@ vendored 코드는 어댑터 폴더의 `_SOURCE.md`(출처·커밋 SHA·수정 �
   "meta": { "...": "정직 라벨 + 플랫폼 메타데이터" }
 }
 ```
+
+일부 플랫폼은 이 구조에 키를 더합니다. Threads와 X는 작성자가 이어 쓴 글 `author_thread[]`를,
+X는 인용한 포스트 `quoted[]`도 돌려줍니다. X의 필드 전체(받은 파일과 실측 `width`/`height`를
+담은 `meta.media_files` 포함)는 `adapters/x/docs/00-overview.md`를 참조하세요.
 
 기본은 사람이 읽는 Markdown, `--json`으로 기계용 구조, `--out FILE`로 파일 저장.
 
@@ -163,10 +208,31 @@ scripts/setup.ps1 -Profile lite  # PowerShell
 | 프로필 | 어댑터 | 대상 |
 |---|---|---|
 | **LITE** | core + 네이버블로그 + YouTube + TikTok + web | 공개 콘텐츠 + 무료 OCR·전사(Groq 키만으로 GPU 없이). 개인 로그인 세션 불필요 — 공유 쉬움. |
-| **FULL** | LITE + Threads + Facebook + Instagram + Whisper | 브라우저 로그인 세션·GPU 필요. 개인용. |
+| **FULL** | LITE + Threads + Facebook + Instagram + X + Whisper | 브라우저 로그인 세션(X는 로그인 쿠키)·GPU 필요. 개인용. |
 
-의존성 매트릭스·시스템 요구사항(ffmpeg·Whisper·Playwright 브라우저)·API 키는
+의존성 매트릭스·시스템 요구사항(ffmpeg·선택 의존 ffprobe·Whisper·Playwright 브라우저)·API 키는
 **[docs/08-packaging.md](docs/08-packaging.md)** 참조.
+
+### X 로그인 쿠키
+
+X는 로그인한 세션에만 대화를 내주므로 X 어댑터에는 쿠키가 필요합니다. x.com에 로그인한
+브라우저에서 쿠키를 **넷스케이프 형식** `cookies.txt`로 내보낸 뒤, `.env.local`(또는 같은
+이름의 환경변수)에 그 파일 경로를 적습니다. 상대경로는 저장소 루트 기준입니다.
+
+```bash
+# .env.local
+X_COOKIES_FILE=/path/to/x_cookies.txt
+```
+
+```bash
+python -m core fetch "https://x.com/someone/status/XXXX" --json
+```
+
+쿠키 파일은 로그인 세션 그 자체입니다 — 저장소 밖에 두고 절대 커밋하지 마세요.
+`X_COOKIES_FILE`을 설정하지 않았거나, 가리키는 파일이 없거나, 쿠키가 만료됐으면
+`AuthRequired` 오류로 끝납니다. X 다운로드는 `gallery-dl`(LITE에 이미 설치됨)을 쓰고,
+시스템에 `ffprobe`가 있으면 받은 미디어의 실제 크기를 잽니다(`meta.media_files[].size_source`가
+`probe`). 없으면 X가 선언한 크기를 쓰고 `size_source`는 `sidecar`입니다.
 
 ---
 

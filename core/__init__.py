@@ -54,6 +54,7 @@ PLATFORM_HOSTS: list[tuple[str, re.Pattern[str]]] = [
     ("naver_blog", re.compile(r"^(?:https?://)?(?:m\.)?blog\.naver\.com/", re.I)),
     ("instagram", re.compile(r"^(?:https?://)?(?:www\.)?instagram\.com/", re.I)),
     ("tiktok", re.compile(r"^(?:https?://)?(?:www\.|vt\.|vm\.)?tiktok\.com/", re.I)),
+    ("x", re.compile(r"^(?:https?://)?(?:www\.|mobile\.)?(?:x\.com|twitter\.com)/", re.I)),
 ]
 
 SUPPORTED_PLATFORMS: tuple[str, ...] = tuple(p for p, _ in PLATFORM_HOSTS)
@@ -74,6 +75,7 @@ _SMART_CAPS: dict[str, dict] = {
                    "comments": {"with_comments": True}},
     "naver_blog": {"media": {}, "comments": None, "media_dir": True},  # media_dir 존재로 다운로드
     "web":        {"media": {}, "comments": None},                    # 미디어 다운로드 비목표
+    "x":          {"media": {"download": True},  "comments": None},   # 답글은 어댑터가 항상 수집(R45)
 }
 
 # smart 다운로드 기본 경로(사용자 media_dir 미지정 시). 기존 tiktok 기본("downloads")과 일치.
@@ -177,6 +179,7 @@ def fetch(
     플랫폼별 kwargs 예:
       threads : deep=, auto=, download=, max_pages=, media_dir=
       youtube : from_start=, with_video=, with_subs=, sub_langs=, media_dir=
+      x       : max_replies=(타인 답글 상한, 기본 100), download=, media_dir=
       web     : js=("auto"/True/False, 기본 "auto"), timeout=(초, 기본 25)
                 — 6플랫폼 host 미매칭 http(s) URL의 범용 폴백(round-10 §④)
     해당 어댑터가 받지 않는 kwarg를 넘기면 어댑터가 TypeError를 낸다(라우터는
@@ -287,7 +290,7 @@ def _apply_smart_kwargs(
             resolved.setdefault("max_comments", 1)
 
     if download is not None:
-        if platform in {"tiktok", "threads", "instagram"}:
+        if platform in {"tiktok", "threads", "instagram", "x"}:
             put({"download": download}, override=True)
         elif platform == "facebook":
             put({"with_video": download}, override=True)
@@ -326,6 +329,28 @@ def _apply_smart_kwargs(
     return resolved
 
 
+# R46: 이미지·카드뉴스·carousel 게시물의 주 콘텐츠 판정. visual이면 enrich_transcribe가
+# 배경음을 전사하지 않는다(.handoff/round-46-visual-post-ambient-audio-plan-lite.md).
+_CONTENT_PRIMARY_PLATFORMS = {"tiktok", "instagram", "facebook"}
+
+
+def _content_primary(meta: dict) -> str | None:
+    """어댑터 사전신호 → "visual" | "mixed" | "spoken" | None(미디어 없음·개수 불명)."""
+    image_count = meta.get("image_count")
+    video_count = meta.get("video_count")
+    if image_count is None and meta.get("is_photo_post") is None:
+        return None  # instagram carousel 열거 실패 등 — 모르면 기존 전사 정책 유지
+    has_image = meta.get("is_photo_post") is True or (isinstance(image_count, int) and image_count > 0)
+    has_video = (
+        meta.get("has_video") is True
+        or meta.get("is_video") is True
+        or (isinstance(video_count, int) and video_count > 0)
+    )
+    if has_image:
+        return "mixed" if has_video else "visual"
+    return "spoken" if has_video else None
+
+
 def _apply_common_labels(
     platform: str, result: dict, *, smart: bool, comments: bool | None
 ) -> dict:
@@ -339,6 +364,8 @@ def _apply_common_labels(
         and not result.get("comments")
     ):
         meta["comments_label"] = "unsupported"
+    if platform in _CONTENT_PRIMARY_PLATFORMS:
+        meta["content_primary"] = _content_primary(meta)
     if meta is not result.get("meta"):
         return {**result, "meta": meta}
     return result

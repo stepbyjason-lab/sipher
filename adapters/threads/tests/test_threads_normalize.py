@@ -65,7 +65,8 @@ def test_comments_item_shape_matches_author_thread_item_shape():
     ]
     result = normalize(posts, source="src", author="alice", code="ROOT")
 
-    expected_keys = {"id", "code", "author", "text", "likes", "reply_count", "media_paths", "text_blocks"}
+    expected_keys = {"id", "code", "author", "text", "likes", "reply_count", "media_paths", "text_blocks",
+                     "created_at_utc"}
     assert set(result["author_thread"][0].keys()) == expected_keys
     assert set(result["comments"][0].keys()) == expected_keys
 
@@ -334,7 +335,10 @@ def test_meta_author_thread_codes_match_returned_author_thread_order():
 
 
 def test_public_item_shape_gains_no_ordering_metadata_field():
-    """정렬은 내부 정책 — taken_at/sequence 같은 새 공개 필드를 노출하지 않는다."""
+    """정렬은 내부 정책 — raw taken_at/sequence는 노출하지 않는다.
+
+    R48부터 게시 시각은 ISO 8601 UTC `created_at_utc` 하나로만 공개한다.
+    """
     posts = [
         _post(code="ROOT", author="alice", text="root", taken_at=1000),
         _post(code="C1", author="alice", text="continuation", taken_at=1100),
@@ -343,6 +347,7 @@ def test_public_item_shape_gains_no_ordering_metadata_field():
 
     assert set(result["author_thread"][0].keys()) == {
         "id", "code", "author", "text", "likes", "reply_count", "media_paths", "text_blocks",
+        "created_at_utc",
     }
 
 

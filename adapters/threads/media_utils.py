@@ -35,20 +35,45 @@ _MAX_MEDIA_BYTES = 300 << 20
 FEED_CONTAINER_KEYS = {"relatedPosts", "related_posts"}
 
 
+# Since ~2026-09 the post page no longer wraps the target thread in
+# `thread_items[].post`: the root sits at `result.data.media`, author
+# continuations at `…self_thread.posts.edges[].node`, replies at
+# `…direct_replies.edges[].node.posts.edges[].node` (INC 2026-10-07).
+# Under these keys only post-shaped dicts count — `direct_replies.edges[].node`
+# is a code-less reply container and must not be taken as a post.
+_POST_SHAPED_KEYS = {"media", "node"}
+
+
+def _is_post_shaped(value) -> bool:
+    return isinstance(value, dict) and bool(value.get("code")) and isinstance(value.get("user"), dict)
+
+
 def iter_thread_posts(data, blocked_keys=FEED_CONTAINER_KEYS) -> List[Dict]:
-    """Returns every `post` object in `data` except those inside a recommendation
-    / related-posts container. Drop-in replacement for nested_lookup("post", data)
-    that no longer treats Threads' "related posts" feed as replies.
+    """Returns every post object of the target thread in `data`, root first, each
+    once (by id → pk → code). Picks legacy `post` objects and the post-shaped
+    `media`/`node` objects of the current page layout; anything inside a
+    recommendation / related-posts container is skipped.
     """
     out: List[Dict] = []
+    seen = set()
+
+    def take(post):
+        key = post.get("id") or post.get("pk") or post.get("code")
+        if key:
+            if key in seen:
+                return
+            seen.add(key)
+        out.append(post)
 
     def rec(node):
         if isinstance(node, dict):
             for key, value in node.items():
                 if key in blocked_keys:
                     continue  # prune the recommendation/feed subtree entirely
-                if key == "post" and isinstance(value, dict):
-                    out.append(value)
+                if (key == "post" and isinstance(value, dict)) or (
+                    key in _POST_SHAPED_KEYS and _is_post_shaped(value)
+                ):
+                    take(value)
                 rec(value)
         elif isinstance(node, list):
             for item in node:
