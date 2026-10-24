@@ -1,0 +1,5 @@
+# sipher-threads 어댑터 의존성 (manifest — 설치는 사용자/승인 게이트)
+# vendored 스크래퍼(scrape.py/fast_scrape.py/threads_scraper*.py)가 직접 의존:
+playwright>=1.40          # 헤드리스 브라우저 크롤 (BSD-3, vdite/threads-scraper 원본 의존성)
+parsel>=1.8                # 임베디드 JSON <script> 태그 XPath 추출 (BSD-3)
+# playwright는 브라우저 바이너리 별도 설치 필요: `playwright install chromium`

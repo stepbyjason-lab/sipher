@@ -1,0 +1,28 @@
+# 보안 불변식 (sipher-fb security-intake §4): 자격증명·세션·미디어 git 제외
+**/cookies/
+**/user_data/
+**/profiles/
+# Chromium persistent profile 내부 — profile_dir 경로명이 규약 밖이어도 세션/쿠키 파일 방어
+**/Default/
+**/*.ldb
+**/Login Data
+**/Cookies
+# 쿠키 파일 — 이름 패턴 전체 커버 (security M2)
+cookies.txt
+*.cookies.txt
+*_cookies.txt
+*.cookie
+*.cookies
+fb_session*
+*_session.txt
+
+# 수집 산출물 (정규화 JSON 출력 + 미디어)
+**/media/
+**/out/
+**/*.normalized.json
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.venv-*/

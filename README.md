@@ -1,0 +1,368 @@
+<!-- Language: English · [한국어](README.ko.md) -->
+
+# Sipher
+
+> **Current public release: v0.1.8**
+
+**Throw any URL or file at it — get back clean, normalized content.**<br>
+**아무 URL이나 파일을 던지면 — 깨끗하게 정규화된 콘텐츠로 돌려줍니다.**
+
+Sipher is a single entry point for pulling content out of social media, the web, and
+local files. Instead of remembering which scraper works for which platform, you run
+one command and get a consistent, structured result every time.
+
+Sipher는 SNS·웹·로컬 파일에서 콘텐츠를 꺼내는 **단일 진입점**입니다. 어느 플랫폼에
+어느 스크래퍼를 써야 하는지 매번 고민할 필요 없이, 명령 하나로 항상 같은 구조의
+결과를 얻습니다. ([한국어 문서 전체 보기 →](README.ko.md))
+
+**All AI enrichment (vision OCR, speech transcription) runs on free tiers and local
+models — $0 in API costs on the default setup. Paid APIs are strictly opt-in.**<br>
+**AI 보강(비전 OCR·음성 전사)까지 전부 무료 티어 + 로컬 모델로 — 기본 설정 기준
+API 비용 $0. 유료 API는 직접 켜야만 동작하는 옵트인입니다.**
+
+> **Sipher** = *siphon* (pull it in) + *(de)cipher* (clean it up).
+> Siphon any URL, decipher it into clean content.
+
+```bash
+python -m core fetch "https://www.threads.net/@someone/post/XXXX"
+```
+
+```
+→ body text, comments, media, and metadata —
+  as readable Markdown (default) or structured JSON (--json)
+```
+
+---
+
+## Why
+
+Every platform needs a different tool — `yt-dlp` for YouTube, `gallery-dl` for TikTok,
+a headless browser for Threads, a mobile API for Naver Blog. You end up picking (and
+mis-picking) a different scraper every time.
+
+Sipher fixes that with **one rule: give it a URL, it routes to the right extractor.**
+
+- **One interface, every source.** 7 platforms + a generic web fallback + local files,
+  all returning the *same* normalized shape.
+- **Deterministic-first, $0.** Typed text is read straight from the page (free).
+  Text in images goes through a free vision-OCR ensemble. Audio/video goes through
+  local Whisper with a free Groq fallback. Even the heavy AI is free by default —
+  see "The free AI stack" below.
+- **Honest by design.** Every result is labeled with what actually happened —
+  `done`, `partial`, `fetch_failed`, `skipped_no_tool`. No silent failures, no faked
+  "success" when a step was skipped or blocked.
+- **A thin router, not a rewrite.** Sipher wraps battle-tested tools; it doesn't
+  reimplement scraping.
+
+---
+
+## The free AI stack — $0 by default
+
+Sipher's AI enrichment is designed to run **end-to-end without a paid key**. It buys
+reliability by stacking *free providers* (a multi-provider ladder), not by adding a
+credit card.
+
+| Stage | Models | Cost |
+|---|---|---|
+| Body & comments | Deterministic parsing — no LLM, read straight from the page | Free |
+| Image OCR | **Writer/judge roster**, configured in `.env.local` (`OCR_CANDIDATES`/`OCR_JUDGES`, `provider:model` lists — no roster is built into the code). The first healthy writer produces one candidate; the first healthy judge inspects the image and corrects it — no unjudged result, no majority vote. Recommended roster (see `.env.example`): Google Gemini/Gemma writers, NIM Gemma/Muse judges falling back to Google. Measured 16/16 passes across 2 runs on 8 card images (0 omissions, 0 background leakage, 0 leaked reasoning) | Free tier |
+| Audio/video transcription | **Local first**: faster-whisper `large-v3` → **free fallback**: Groq `whisper-large-v3-turbo` (then `whisper-large-v3` on quota). Video gets its audio extracted via ffmpeg before upload | Local / free tier |
+| Paid fallback | Considered only after every configured free writer is exhausted; set `OCR_PAID_FALLBACK=claude` plus `CLAUDE_OCR_MODEL` (required, no built-in default) to opt in. The result still passes through `OCR_JUDGES` | Opt-in |
+
+- When a free quota runs out, sipher leaves an **honest skip/degrade label** instead
+  of silently charging you.
+- The NVIDIA NIM key is free at [build.nvidia.com](https://build.nvidia.com), no card required.
+
+---
+
+## What it can do
+
+| Source | What you get |
+|---|---|
+| **Threads** | Post body plus root-author follow-ups and full rich-text cards by default. Root-author follow-ups are returned in the author's posting-time order when source timestamps are available. Continuation resolution reports stderr progress and returns an honest `partial` result after its 45-second budget; use `--all-comments` for visible replies, `--auto` for conditional deep crawl, or `--deep` for the full reply tree. |
+| **YouTube** | Description, metadata, media, `--from-start` (live from the beginning), live-chat replay, optional transcript & comments. |
+| **Facebook** | Body, **full-size photos** (lightbox bypass + hidden `+N` shots), video, and **comment bodies** with honest confidence labels. `meta.post_kind` (`reel`, `video` or `post`, decided from the URL) and `meta.post_video_count` (videos inside the post itself; `null` when unknown) tell a photo post from a video post — `meta.video_count` still counts every video the page loaded, including recommended ones. |
+| **Instagram** | Caption, media, metadata. Login session required (Instagram blocks anonymous access) — reported honestly via access labels. |
+| **TikTok** | Caption, stats, metadata; optional video download. |
+| **X** | Post body, the author's own follow-up posts (`author_thread[]`), quoted posts (`quoted[]` — a quoted article comes with its title, cover and images), the author's replies and other users' replies (`comments[]`, each tagged `kind`), and original-resolution photos and video. Posting times come as `created_at_utc` (ISO 8601 UTC, `null` when unknown), and every `media_files[]` entry carries an `origin` (`self`, `quoted:<id>`, `comment:<id>`) so quoted or reply images are not read as the post's own. **X login cookies required** (`X_COOKIES_FILE`, see "Login files" below) — without them you get an explicit `AuthRequired` error, never an empty success. `--max-replies N` (default 100) caps other users' replies only. |
+| **Naver Blog** | Mobile-API listing + body + metadata + original-resolution images. (Pure standard library — zero dependencies.) |
+| **Any web article** | Generic fallback for anything the 7 platforms don't cover. Two-tier: fast static fetch → JS-rendered browser when the page is an SSR shell. Built-in SSRF defense. |
+| **Local files** | PDF / DOCX / PPTX / XLSX / CSV / images / audio / video → text, via document conversion + OCR + transcription. |
+
+### Enrichment (opt-in)
+
+- `--ocr` — extract text from images. A single configured writer produces a
+  candidate and a configured judge corrects it against the image (no NIM key →
+  the judge roster falls through to a Google entry); see "The free AI stack"
+  above for the writer/judge roster mechanism.
+- `--transcribe` — transcribe audio/video. Local Whisper first; if it's missing or
+  fails, **auto-falls back to free Groq Whisper** — a machine with no GPU can still
+  transcribe with just a Groq key.
+
+### Image-first posts: background music is not a transcript
+
+Photo posts, card-news and carousels on Instagram, Facebook and TikTok often carry
+background music. Sipher does not transcribe it: `transcript` stays `null`,
+`meta.transcript_label` is `skipped_ambient_audio`, and the audio files are listed in
+`meta.ambient_audio_paths`. These platforms also get `meta.content_primary`
+(`visual`, `mixed`, `spoken`, or `null` when the media count is unknown); only `visual`
+posts skip transcription.
+
+### Transcription results: labels, errors, quality
+
+`meta.transcript_label` tells you what happened to the audio, so an empty transcript is
+never ambiguous. Besides `done`, `partial`, `failed` and the skip labels:
+
+- `no_audio` — every video that was downloaded has no audio track. Nothing is sent to a
+  transcriber, and the file paths are listed in `meta.no_audio_paths`. If only some
+  videos are silent that way, they are left out of the count and the label comes from the
+  rest.
+- `no_speech` — the audio track exists and transcription succeeded, but no speech was
+  left. `transcript` is `""` (not `null`).
+- `not_requested` — the step was switched off (`--no-transcribe`, or `transcribe=False`
+  from Python), so it was not attempted. `meta.ocr_label` uses `not_requested` the same
+  way (`--no-ocr`). An adapter's own label
+  for that key (for example YouTube's) is left as it is.
+
+When a file fails, `meta.transcript_errors` lists it: `media_path`, a `reason`, and
+`attempts` — one `{backend, reason}` entry per backend that was tried (`local`, then
+`groq`). The key is absent when nothing failed. `reason` is one of `no_audio_stream`,
+`app_blocked`, `decode_failed`, `timeout`, `upload_unavailable`, `rate_limited`, `auth`,
+`network`, `http_5xx`, `bad_response`, `missing_file`, `unexpected`, `other`.
+
+`meta.transcript_quality` has one entry per file that was transcribed successfully:
+`media_path`, `backend`, `no_speech`, `dropped` (how many segments were removed) and
+`segments`. When Groq returns per-segment signals (`no_speech_prob`, `avg_logprob`,
+`compression_ratio`), segments that the signals mark as non-speech are removed from the
+text, and they stay in `segments` with `dropped: true` and their text so you can restore
+one. If the response has no usable signals, or the local backend ran (it returns plain
+text only), nothing is removed and `segments` is `null`. A file whose text comes back
+empty counts as `no_speech`.
+
+### OCR failures: `meta.ocr_errors`
+
+When OCR fails on one or more images, `meta.ocr_errors` lists each failed image:
+`media_path`, a `reason`, and `attempts` — one `{provider, reason}` entry per failed
+provider call (writers and judges, including the paid fallback if it was tried). The key
+is absent when no image failed. `reason` is one of `timeout`, `http_5xx`, `http_4xx`,
+`bad_json`, `bad_response`, `network`, `rate_limited`, `quota_exhausted`,
+`empty_response`, `writer_failed`, `judge_failed`, `file_missing`, `deadline`,
+`unexpected`, `other`. `meta.ocr_label` is `done` only when every downloaded image
+succeeded — even if the adapter declared fewer images than it actually downloaded.
+
+Two rules keep a slow provider from stalling a post:
+
+- **Repeated timeouts** — if the same provider and model time out twice in a row on one
+  post, it is skipped for the rest of that post. In a failed image's `attempts`, the skip
+  appears as `reason: "timeout_skipped"`. The next post starts fresh.
+- **Post deadline** — `OCR_POST_DEADLINE` (default 900 seconds, `0` = no deadline) caps
+  the OCR of one post. Once it passes, no provider is called again; a call already in
+  flight is allowed to finish. Images the deadline cut off are listed with
+  `reason: "deadline"`, and `meta.ocr_label` is `partial` or `failed`.
+
+### When part of a fetch fails
+
+A failure in one step does not discard what was already collected:
+
+- **YouTube** — if the media folder cannot be created, the title, description and
+  chapters are still returned and `meta.video_label` (and `meta.chat_label` when chat was
+  requested) is `download_failed`.
+- **OCR wait budget** — waiting out a rate-limit cool-down is capped by `OCR_MAX_TOTAL_WAIT`
+  (default 600 s) **per post**; the next post starts with a full budget.
+- **TikTok** — when gallery-dl returns no metadata, the error keeps its original sentence
+  and adds the cause gallery-dl reported: `: <kind> — <explanation> (gallery-dl: <evidence line>)`.
+  `kind` is one of `content_restricted` (login needed or limited audience), `region_locked`,
+  `not_found` (missing or deleted), `challenge` (TikTok's bot check was not passed — may be
+  temporary, worth retrying) or `unknown` (gallery-dl left no known cause).
+- **Paid-fallback prompt** — when every configured free writer is exhausted, an
+  interactive terminal is asked once whether to use the paid fallback. No answer within
+  60 seconds counts as "no" and the fetch moves on; the question is not repeated in the
+  same process.
+
+### Threads progress and partial results
+
+Threads progress events are emitted as JSON Lines on **stderr**; stdout stays the final
+Markdown or JSON result. A result with
+`meta.author_thread.resolution.status == "partial"` is not a fetch failure: the root post
+and collected author follow-ups are valid, while `partial_reason` and
+`unresolved_candidates` explain what remained unresolved before the continuation time budget.
+
+Python callers can pass `progress=callback` to `core.fetch()` or
+`adapters.threads.fetch()` to receive the same lifecycle event dictionaries directly.
+
+### Threads posting time
+
+The Threads result carries each post's original posting time as `created_at_utc`
+(ISO 8601 UTC, e.g. `2025-08-28T03:12:45+00:00`) in the root `meta`, in every
+`author_thread[]` item and in every comment. It is `null` when the source gives no time —
+it is never filled with `fetched_at`, which is the time sipher collected the page.
+
+### Threads root-author order
+
+`author_thread[]` preserves the root author's posting-time order rather than the order in
+which GraphQL or continuation requests discovered the posts. If two posts have the same
+source time, or a source time is unavailable, their original discovery order is retained.
+This ordering does not reconstruct the full nested reply tree; `comments[]` remains
+unsorted.
+
+### Restricted Threads posts
+
+For some Threads posts a logged-out browser gets "This content isn't available to everyone"
+instead of the post. sipher recognises that page and stops with
+`root_not_found: content_restricted` (progress event `collection_failed`,
+`reason: content_restricted`) instead of a generic "root post not found". A login may be
+needed: set a cookie file (`THREADS_COOKIES_FILE`, created with
+`python -m adapters.threads.threads_scraper_v2 --login` — see "Login files" below) and fetch
+again. The restriction can also be regional or audience-based, so a login is not guaranteed
+to open it.
+
+---
+
+## Built on — sources & credits
+
+This is what "wraps battle-tested tools" actually means. Per platform, here is what
+runs underneath — and what the author wrote from scratch vs. open source:
+
+| Platform | Based on | Home-grown / modified |
+|---|---|---|
+| **Threads** | fork of [vdite/threads-scraper](https://github.com/vdite/threads-scraper) (MIT) | 3 modifications in [our fork](https://github.com/stepbyjason-lab/threads-scraper): media extraction & download, target-thread scoping (drops recommended-feed noise), fast/deep tiered dispatcher. Sipher adds rich-text preservation, root-author continuation progress, and honest partial results; full discussion crawling is opt-in. |
+| **YouTube** | [yt-dlp](https://github.com/yt-dlp/yt-dlp) (Unlicense) | Thin wrapper — only the `--from-start` / live-chat-replay wiring and normalization are ours |
+| **Facebook** | **Written by the author** | Lightbox-bypass full-size photos, hidden `+N` shots, comment collection — built from scratch because no public alternative exists |
+| **Instagram** | [instaloader](https://github.com/instaloader/instaloader) (MIT) | Direct library calls + our honest access-label layer |
+| **TikTok** | [gallery-dl](https://github.com/mikf/gallery-dl) (GPL-2.0) | Called across a subprocess boundary (no code linkage) |
+| **X** | [gallery-dl](https://github.com/mikf/gallery-dl) (GPL-2.0) | Called across a subprocess boundary, same as TikTok. Splitting the conversation into body / author thread / quoted posts / replies, the reply cap and the cookie-error handling are ours |
+| **Naver Blog** | **Written by the author** | Pure standard library (zero deps) — mobile API + original-resolution images |
+| **Generic web** | [fivetaku/insane-search](https://github.com/fivetaku/insane-search) engine (MIT, vendored unmodified) | Tier 1 (WAF grid, SSRF defense) is the engine as-is. Tier 2 JS-render and auto-escalation are ours |
+
+Vendored code is tracked with a `_SOURCE.md` (upstream, commit SHA, modification log)
+and the original `LICENSE` in each adapter folder — details in
+[adapters/README.md](adapters/README.md).
+
+---
+
+## Output shape
+
+One normalized schema, no matter the source:
+
+```json
+{
+  "source": "...",
+  "platform": "threads | youtube | facebook | instagram | tiktok | naver_blog | x | web | local",
+  "body_text": "...",
+  "comments": [ { "author": "...", "text": "...", "likes": 0 } ],
+  "ocr_text": [ { "media_path": "...", "text": "..." } ],
+  "transcript": "... or null",
+  "media_paths": [ "media/..." ],
+  "meta": { "...": "honest labels + platform metadata" }
+}
+```
+
+Some platforms add keys to this shape: Threads and X return `author_thread[]` (the
+author's own follow-up posts), and X also returns `quoted[]` (quoted posts).
+X's `meta.media_files` describes downloaded files, including their measured
+`width`/`height` when available.
+
+Human-readable Markdown is the default; add `--json` for the machine shape,
+`--out FILE` to write to disk.
+
+---
+
+## Quick start
+
+```bash
+git clone <repo-url> sipher
+cd sipher
+
+# LITE (default) or FULL profile — creates a venv and installs deps
+scripts/setup.sh lite            # bash
+scripts/setup.ps1 -Profile lite  # PowerShell
+
+# Run
+.venv/bin/python -m core fetch "<URL or file path>"
+# Windows: .venv\Scripts\python.exe -m core fetch "<URL or file path>"
+```
+
+**Profiles**
+
+| Profile | Adapters | For |
+|---|---|---|
+| **LITE** | core + Naver Blog + YouTube + TikTok + web | Public content + free OCR & transcription (Groq key, no GPU needed). No personal login sessions — easy to share. |
+| **FULL** | LITE + Threads + Facebook + Instagram + X + Whisper | Needs browser login sessions (X: your login cookies) / GPU. Personal use. |
+
+Python dependencies are listed in [requirements-lite.txt](requirements-lite.txt) and
+[requirements-full.txt](requirements-full.txt). Install system `ffmpeg` for media
+processing; optional `ffprobe` measures downloaded media. Browser-based adapters need
+Google Chrome or Playwright Chromium (`python -m playwright install chromium`).
+Local transcription needs Whisper; the Groq fallback needs a `GROQ_API_KEY`.
+Configure OCR providers and other API keys using [.env.example](.env.example).
+
+### Login files
+
+Platforms that need a login read the path of your cookie or session file from `.env.local`
+(or an environment variable of the same name). Relative paths resolve from the sipher folder
+where `.env.local` lives. Keep the files in `.sipher-auth/` inside that folder — git ignores
+it, so the files are never committed or shipped. A command-line option (such as
+`--profile-dir`) wins over these keys.
+
+| Platform | Key | What goes there |
+|---|---|---|
+| X | `X_COOKIES_FILE` | Netscape-format cookie file exported from a browser logged in to x.com |
+| Threads | `THREADS_COOKIES_FILE` | Cookie file for a logged-in session: the JSON written by `python -m adapters.threads.threads_scraper_v2 --login`, a cookie export from a browser extension (JSON), or a Netscape cookies.txt — sipher tells them apart by content. If unset, the older location `adapters/threads/threads_cookies.json` is still used |
+| Facebook | `FACEBOOK_PROFILE_DIR` | Browser profile folder for the persistent login |
+| Facebook | `FACEBOOK_COOKIES_FILE` | Netscape cookie file for the `cookies_txt` login. Without `--auth-mode`, sipher picks the mode automatically — the order is in `resolve_auth_mode()` in `adapters/facebook/auth.py` |
+| Instagram | `INSTAGRAM_SESSION_FILE` | instaloader session file (`instaloader --login <user>` writes one) |
+
+```bash
+# .env.local
+X_COOKIES_FILE=.sipher-auth/x_cookies.txt
+THREADS_COOKIES_FILE=.sipher-auth/threads_cookies.json
+FACEBOOK_PROFILE_DIR=.sipher-auth/facebook-profile
+INSTAGRAM_SESSION_FILE=.sipher-auth/instagram-session
+```
+
+X only serves a conversation to a logged-in session, so the X adapter needs its cookies:
+
+```bash
+python -m core fetch "https://x.com/someone/status/XXXX" --json
+```
+
+A login file is your login session — keep it in `.sipher-auth/` and never commit it. If
+`X_COOKIES_FILE` is unset, points to a missing file, or the cookies have expired, the fetch
+ends with an `AuthRequired` error. X downloads use `gallery-dl` (already installed with the
+LITE profile); a system `ffprobe`, if present, measures the real size of downloaded media
+(`meta.media_files[].size_source` is `probe`; without it, X's declared size is used and
+`size_source` is `sidecar`).
+
+---
+
+## Language
+
+The pipeline is **language-agnostic** and adapts to you automatically:
+
+- **On first run, sipher detects your OS locale** and stores it as `SIPHER_LANG`
+  in `.env.local` — edit it anytime (e.g. `SIPHER_LANG=en`, `ja`, `ko`).
+- Vision OCR and Whisper transcription follow this setting. Korean uses a
+  PoC-validated prompt; every other language gets a language-neutral one.
+- CLI help and `.env.example` are bilingual (English + Korean). Internal docs
+  are currently Korean (the tool itself works anywhere).
+
+---
+
+## Documentation
+
+| Doc | Contents |
+|---|---|
+| [README.ko.md](README.ko.md) | Korean usage and setup guide |
+| [adapters/README.md](adapters/README.md) | Adapter list & licensing |
+
+---
+
+## License
+
+[MIT](LICENSE). Vendored and third-party components keep their own licenses —
+see the `LICENSE` file's *Third-party components* section and
+[adapters/README.md](adapters/README.md).
+
+---
+
+<sub>한국어 안내는 **[README.ko.md](README.ko.md)** 를 참고하세요.</sub>

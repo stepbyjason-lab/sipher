@@ -1,0 +1,4 @@
+# sipher-fb 어댑터 의존성 (manifest — 설치는 사용자/승인 게이트)
+playwright>=1.40          # 브라우저 자동화 + 인증 context
+# 선택: ③ cookies-from-browser 모드용 (없으면 persistent/cookies_txt 사용)
+# browser_cookie3>=0.19

@@ -1,0 +1,22 @@
+# sipher LITE 프로필 — 공개 콘텐츠 + 무료 API OCR만. 개인 로그인 세션 불필요.
+# 대상: 팀원·지인 공유(docs/08-packaging.md 참조). `-r` include로 per-adapter
+# manifest를 집계한다(DRY — per-adapter requirements.txt가 SSOT, 여기서 재정의 안 함).
+#
+# 설치: scripts/setup.sh(bash) / scripts/setup.ps1(PowerShell)
+#       또는 직접: pip install -r requirements-lite.txt
+
+# core: markitdown(옵션 문서변환) + requests(필수, llm_free.py OCR 클라이언트)
+-r core/requirements.txt
+
+# youtube: yt-dlp(필수) + 옵션 transcript/comments 클라이언트(주석 처리, 필요시 개별 설치)
+-r adapters/youtube/requirements.txt
+
+# tiktok: gallery-dl(subprocess 호출, GPL-2.0 — 프로세스 경계라 전파 없음)
+-r adapters/tiktok/requirements.txt
+
+# web: curl_cffi(tier1) + pyyaml + playwright(tier2, 범용 폴백 JS 렌더용).
+# tier1(정적 페이지)만 쓰면 `playwright install chromium` 생략 가능.
+-r adapters/web/requirements.txt
+
+# naver_blog: 순수 stdlib(urllib) — 의존성 없음, requirements.txt 파일 자체가 없음.
+# (여기 -r로 include할 파일이 존재하지 않으므로 의도적으로 생략)

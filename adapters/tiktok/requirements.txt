@@ -1,0 +1,7 @@
+# gallery-dl: GPL-2.0 License. sipher는 이 라이브러리를 vendor하지 않고
+# subprocess(`python -m gallery_dl ...`)로 별도 프로세스로 호출만 한다 —
+# GPL의 "링크/파생 저작물" 조건은 동일 프로세스 내 코드 결합에 적용되므로,
+# subprocess 경계로 분리된 독립 실행 파일 호출에는 라이선스 전파 의무가
+# 없다는 것이 일반적 해석(통설, round-09 리뷰 P3 팔로우업 — round-10 §⑤).
+# 사용자가 자기 pip 환경에 별도 설치(재배포 아님)하므로 재배포 의무도 없음.
+gallery-dl>=1.32,<2

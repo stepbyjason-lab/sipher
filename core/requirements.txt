@@ -1,0 +1,11 @@
+# sipher 코어(core/) 전용 pip 의존성.
+# 어댑터별 의존성은 adapters/<platform>/requirements.txt에 각자 명시(자급자족 원칙).
+#
+# markitdown: core/markitdown_local.py — 로컬 문서(.pdf/.docx/.pptx/.xls/.xlsx/
+# .csv/.ipynb/.msg/.zip) → Markdown 변환(round-10 §③). MIT License(Microsoft).
+# 선택적 의존성 — 미설치 시 core/local.py가 ValueError 대신 정직 degrade
+# (meta.conversion_label="skipped_no_tool")로 처리하므로 하드 요구사항은 아니다.
+markitdown>=0.0.1,<0.1
+
+# requests: core/llm_free.py — 무료비전 OCR(Gemini) HTTP 클라이언트. 필수(하드 의존성).
+requests>=2.31
