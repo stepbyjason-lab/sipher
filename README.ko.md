@@ -69,9 +69,9 @@ Sipher의 AI 보강은 **유료 키 없이 끝까지 돌아가도록** 설계됐
 |---|---|
 | **Threads** | 본문·원글 작성자 후속글·접힌 rich-text 카드를 기본 수집. 원글 작성자 후속글은 출처 시각이 있을 때 작성자의 실제 게시 시간순으로 반환. continuation은 stderr progress를 내며 45초 예산 뒤에도 확보분을 정직한 `partial` 결과로 반환. 타인 댓글은 `--all-comments`, 조건부 deep 크롤은 `--auto`, 전체 reply tree는 `--deep`으로 명시. |
 | **YouTube** | 설명·메타·미디어, `--from-start`(라이브 처음부터), 라이브 채팅 replay, (옵션) 자막·댓글. |
-| **Facebook** | 본문, **풀사이즈 사진**(라이트박스 우회 + 숨은 `+N`장), 영상, **댓글 본문**(정직한 신뢰도 라벨). `meta.post_kind`(`reel`·`video`·`post`, 주소로 정함)와 `meta.post_video_count`(게시물 자체에 든 영상 수, 모르면 `null`)로 사진 글과 영상 글을 가릅니다 — `meta.video_count`는 여전히 추천 영상까지 포함해 페이지가 불러온 영상을 모두 셉니다. |
-| **Instagram** | 캡션·미디어·메타. 로그인 세션 필요(익명 접근 차단) — access 라벨로 정직 보고. |
-| **TikTok** | 캡션·통계·메타, (옵션) 영상 다운로드. |
+| **Facebook** | 본문, **풀사이즈 사진**(라이트박스 우회 + 숨은 `+N`장), 영상, **댓글 본문**(정직한 신뢰도 라벨). `meta.post_kind`(`reel`·`video`·`post`, 주소로 정함)와 `meta.post_video_count`(게시물 자체에 든 영상 수, 모르면 `null`)로 사진 글과 영상 글을 가릅니다 — `meta.video_count`는 여전히 추천 영상까지 포함해 페이지가 불러온 영상을 모두 셉니다. 릴스는 영상 트랙 전체(가장 높은 화질)와 음성 트랙을 따로 받습니다. 이 방식은 릴스 주소(`/reel/<id>`)에만 쓰이고, 그 밖의 DASH 영상(`/videos/`·`/watch`)은 아직 받지 못합니다. |
+| **Instagram** | 캡션·미디어·메타. 로그인 세션 필요(익명 접근 차단) — access 라벨로 정직 보고. 세션 요청이 계정 경고(`feedback_required`·spam·429·checkpoint·로그인 강제)를 받으면 `.sipher-auth/instagram-account-warning.lock`을 남기고 멈춥니다. 이 파일을 지울 때까지 세션 요청은 막힙니다. |
+| **TikTok** | 캡션·통계·메타, (옵션) 영상 다운로드. `--collector aside`는 Aside 브라우저로 읽기만 하는 옵트인 수집입니다(미디어는 받지 않음). `PATH`의 `aside` CLI(또는 `SIPHER_ASIDE_EXE`)와 TikTok에 로그인된 브라우저가 필요합니다. **계정당 하루(KST) 2회**까지만 쓰세요 — sipher는 횟수를 세지 않으니 직접 챙겨야 합니다. 로그인·캡차·계정 경고 화면이 나오면 멈춥니다. |
 | **X** | 원글 본문, 작성자가 이어 쓴 글(`author_thread[]`), 인용한 포스트(`quoted[]` — 인용 아티클은 제목·표지·이미지까지), 저자 대댓글과 타인 답글(`comments[]`, 항목마다 `kind` 표시), 원본 해상도 사진·영상. 게시 시각은 `created_at_utc`(ISO 8601 UTC, 모르면 `null`)로 싣고, `media_files[]` 항목마다 `origin`(`self`·`quoted:<id>`·`comment:<id>`)을 붙여 인용 글이나 답글의 이미지를 원글 것으로 읽지 않게 합니다. **X 로그인 쿠키 필수**(`X_COOKIES_FILE`, 아래 "로그인 파일" 참조) — 없으면 빈 성공이 아니라 `AuthRequired` 오류로 알립니다. `--max-replies N`(기본 100)은 타인 답글에만 상한을 겁니다. |
 | **네이버 블로그** | 모바일 API 목록 + 본문 + 메타 + 원본 해상도 이미지. (순수 표준 라이브러리 — 무의존.) |
 | **일반 웹 아티클** | 7개 플랫폼에 안 걸리는 모든 것의 범용 폴백. 2-tier: 빠른 정적 fetch → SSR 껍데기면 JS 렌더 브라우저. SSRF 방어 내장. |
@@ -118,8 +118,11 @@ Instagram·Facebook·TikTok의 사진 게시물·카드뉴스·carousel에는 �
 `backend`, `no_speech`, `dropped`(뺀 구간 수), `segments`. Groq가 구간별 신호
 (`no_speech_prob`·`avg_logprob`·`compression_ratio`)를 돌려주면, 신호가 말 없음으로 가리킨
 구간은 전사 글에서 빠지고 `segments`에 `dropped: true`와 그 구간의 글로 남아 필요하면 되살릴 수
-있습니다. 응답에 쓸 만한 신호가 없거나 로컬 백엔드를 썼다면(글만 돌려줍니다) 아무것도 빼지
-않고 `segments`는 `null`입니다. 글이 빈 채로 돌아온 파일은 `no_speech`로 셉니다.
+있습니다. 응답에 쓸 만한 신호가 없으면 아무것도 빼지 않고 `segments`는 `null`입니다.
+로컬 백엔드에는 구간별 신호가 없습니다. 대신 `.srt`가 있으면 묶음 반복(같은 글이 3구간 이상,
+구간 평균 0.2초 미만 — 첫 구간만 남김)만 빼고, `segments`에 모든 구간을 싣습니다. 뺀 구간에는
+`drop_reason: "repeat_burst"`가 붙습니다. `.srt`가 없거나 모양이 어긋나면 아무것도 빼지 않고
+`segments`는 `null`입니다. 글이 빈 채로 돌아온 파일은 `no_speech`로 셉니다.
 
 ### OCR 실패 기록: `meta.ocr_errors`
 
@@ -311,8 +314,10 @@ python -m core fetch "https://x.com/someone/status/XXXX" --json
 
 - **첫 실행 시 OS locale을 자동 감지**해 `.env.local`에 `SIPHER_LANG`으로
   저장합니다 — 언제든 직접 수정 가능(예: `SIPHER_LANG=en`, `ja`, `ko`).
-- 비전 OCR과 Whisper 전사가 이 설정을 따릅니다. 한국어는 PoC 검증된 프롬프트,
-  그 외 언어는 언어중립 프롬프트를 씁니다.
+- 비전 OCR이 이 설정을 따릅니다. 한국어는 PoC 검증된 프롬프트, 그 외 언어는
+  언어중립 프롬프트를 씁니다.
+- 전사는 파일마다 말하는 언어를 자동 감지합니다. 언어를 정하려면
+  `SIPHER_TRANSCRIBE_LANG`을 적습니다(예: `SIPHER_TRANSCRIBE_LANG=en`).
 - CLI 도움말과 `.env.example`은 한/영 병기입니다.
 
 ---

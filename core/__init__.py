@@ -154,6 +154,7 @@ def fetch(
     transcribe: bool | None = None,
     download: bool | None = None,
     comments: bool | None = None,
+    collector: str | None = None,
     whisper_model: str | None = None,
     whisper_device: str | None = None,
     whisper_compute: str | None = None,
@@ -200,6 +201,15 @@ def fetch(
     (large-v3/cuda/float16)에 위임. compute는 디바이스와 짝을 맞춰야 한다 —
     CPU는 int8 필요, float16은 GPU 전용.
     """
+    if collector not in (None, "aside"):
+        raise ValueError("지원하지 않는 collector입니다")
+    if collector == "aside":
+        # 별도 opt-in 경로: smart의 다운로드 기본값을 주입하지 않는다.
+        from adapters.tiktok.aside import fetch as fetch_aside
+
+        result = fetch_aside(url, download=download is True, comments=comments, **kwargs)
+        result = _apply_common_labels("tiktok", result, smart=smart, comments=comments)
+        return _mark_not_requested(result, ocr=False, transcribe=False)
     local_path = _resolve_local(url)
     if local_path is not None:
         from . import local

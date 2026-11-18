@@ -12,8 +12,8 @@ gallery-dl은 `sys.executable -m gallery_dl`로 호출한다(PATH에 CLI 콘솔 
 없어도 동작 — adapters/youtube의 yt-dlp 호출 패턴과 동일 원칙, core/transcribe.py의
 subprocess 안전 원칙도 동일: list 인자, shell=False).
 
-첫 댓글 수집은 이번 스코프 밖이다 — `--dump-json`이 댓글을 채우지 않음(round-09
-spike로 실측 확인, contract §비목표).
+이 기본 gallery-dl 경로는 댓글을 수집하지 않는다. 명시 선택하는 R52a aside 경로는
+별도 모듈 `adapters.tiktok.aside`에 있다(자동 폴백 없음).
 """
 from __future__ import annotations
 

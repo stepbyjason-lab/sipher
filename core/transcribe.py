@@ -84,6 +84,15 @@ _HALLUCINATION_PHRASES = frozenset({"감사합니다", "다음영상에서만나
 _HALLUCINATION_COMPRESSION_RATIO_MAX = 0.8
 _HALLUCINATION_AVG_LOGPROB_MIN = -0.75
 
+# R27-H5: 로컬 whisper가 같은 문장을 말할 수 없을 만큼 짧은 시간에 연달아 찍는 「묶음 반복」 환각.
+# 측정(`.handoff/r27-h5/MEASURE-20261118.md`): 환각 묶음은 10·15구간이 0.9초 안(구간 평균 0.06~0.09초),
+# 실제 반복은 3구간 5.77초·2구간 0.54초 이상. 구간 신호는 로컬에 없어 도구가 쓰는 `.srt` 시각만 쓴다.
+_REPEAT_BURST_MIN_SEGMENTS = 3
+_REPEAT_BURST_MAX_MEAN_SECONDS = 0.2
+_SRT_TIME_RE = re.compile(
+    r"^(\d+):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d+):(\d{2}):(\d{2}),(\d{3})\s*$"
+)
+
 
 class TranscribeError(RuntimeError):
     """전사 호출 실패(도구/키 없음·타임아웃·비정상 종료·출력 누락 등).
@@ -153,6 +162,26 @@ def _local_config() -> tuple[Path | None, int]:
     return (Path(tool_dir) if tool_dir else None), timeout
 
 
+def _transcribe_lang() -> str | None:
+    """전사 언어 — `SIPHER_TRANSCRIBE_LANG`(환경변수 → `.env.local`). 없으면 None(자동 감지).
+
+    R27-H4: `SIPHER_LANG`(사용자가 읽는 언어, 첫 실행 때 OS 로캘이 자동 기록됨)은 보지 않는다 —
+    녹음 속 언어와 다르다. 값은 `core.lang`과 같은 규칙으로 primary subtag만 받는다
+    (CLI 인자·폼 필드로 흘러드니 임의 문자열을 막는다). `auto`나 읽지 못한 값은 자동 감지다.
+    """
+    from .lang import _normalize
+
+    raw = os.environ.get("SIPHER_TRANSCRIBE_LANG") or _load_env_file(_ROOT / ".env.local").get(
+        "SIPHER_TRANSCRIBE_LANG"
+    )
+    if not raw or raw.strip().lower() == "auto":
+        return None
+    lang = _normalize(raw)
+    if lang is None:
+        _log.warning("SIPHER_TRANSCRIBE_LANG 값을 읽지 못해 자동 감지로 전사한다")
+    return lang
+
+
 def _venv_python(tool_dir: Path) -> Path:
     return tool_dir / ".venv" / "Scripts" / "python.exe"
 
@@ -219,9 +248,14 @@ def _transcribe_local(
     model: str | None,
     device: str | None,
     compute: str | None,
-    lang: str,
+    lang: str | None,
 ) -> dict:
-    """local whisper-transcribe 도구 subprocess 호출 → `{"text","model","backend":"local"}`.
+    """local whisper-transcribe 도구 subprocess 호출 → `{"text","model","quality","backend":"local"}`.
+
+    R27-H5: `quality`는 `_filter_local_segments`가 도구 `.srt`로 묶음 반복을 거른 결과다(Groq와 같은 모양).
+
+    `lang`이 None이면 도구에 `--lang auto`(자동 감지)를 넘긴다 — 도구의 기본값은 `ko`라
+    인자를 빼면 한국어로 강제된다(R27-H4).
 
     whisper-transcribe CLI(`WHISPER_TRANSCRIBE_DIR`의 `transcribe.py`)를
     subprocess로 호출한다. `model`/`device`/`compute`를 지정하지 않으면 해당
@@ -251,7 +285,7 @@ def _transcribe_local(
             str(venv_python),
             str(script),
             str(media_path),
-            "--lang", lang,
+            "--lang", lang or "auto",
             "--outdir", str(outdir),
         ]
         if model:
@@ -312,10 +346,13 @@ def _transcribe_local(
             raise TranscribeError(
                 f"whisper 출력 파일 읽기 실패: {txt_path.name} ({type(e).__name__})"
             ) from e
+        text, quality = _filter_local_segments(outdir / f"{media_path.stem}.srt", text)
 
     used_model = model or "large-v3"  # 도구 자체 기본값(미지정 시)과 동일 표기
+    if quality["dropped"]:
+        _log.info("whisper(local) 묶음 반복 %d구간 거름: %s", quality["dropped"], media_path.name)
     _log.info("whisper(local) 전사 완료: %s (model=%s)", media_path.name, used_model)
-    return {"text": text, "model": used_model, "backend": "local"}
+    return {"text": text, "model": used_model, "quality": quality, "backend": "local"}
 
 
 # ── Groq Whisper backend(round-27) ──────────────────────────────────────────
@@ -543,12 +580,80 @@ def _filter_segments(payload: dict, text: str) -> tuple[str, dict]:
     return text, {"segments": segments, "dropped": dropped_count}
 
 
+def _parse_srt(content: str) -> list[dict] | None:
+    """whisper 도구의 `.srt` → `[{"start", "end", "text"}]`. 한 블록이라도 모양이 어긋나면 None."""
+    segments: list[dict] = []
+    for block in re.split(r"\n\s*\n", content.replace("\r\n", "\n").strip()):
+        lines = block.strip("\n").split("\n")
+        if len(lines) < 2 or not lines[0].strip().isdigit():
+            return None
+        m = _SRT_TIME_RE.match(lines[1].strip())
+        if m is None:
+            return None
+        h1, m1, s1, ms1, h2, m2, s2, ms2 = (int(g) for g in m.groups())
+        segments.append({
+            "start": h1 * 3600 + m1 * 60 + s1 + ms1 / 1000,
+            "end": h2 * 3600 + m2 * 60 + s2 + ms2 / 1000,
+            "text": " ".join(line.strip() for line in lines[2:]).strip(),
+        })
+    return segments
+
+
+def _repeat_burst_drops(segments: list[dict]) -> list[bool]:
+    """R27-H5: 구간마다 묶음 반복으로 거를지. 같은 글(정규화)이 연달아 `_REPEAT_BURST_MIN_SEGMENTS`
+    구간 이상이고 「처음 시작~마지막 끝 ÷ 구간 수」가 `_REPEAT_BURST_MAX_MEAN_SECONDS` 미만이면 첫 구간만 남긴다."""
+    keys = [re.sub(r"[\W_]+", "", seg["text"]).lower() for seg in segments]
+    drops = [False] * len(segments)
+    i = 0
+    while i < len(segments):
+        j = i
+        while keys[i] and j + 1 < len(segments) and keys[j + 1] == keys[i]:
+            j += 1
+        count = j - i + 1
+        # `.srt` 시각은 밀리초라 밀리초 정수로 견준다 — 0.6 / 3 같은 경계가 부동소수점으로 0.2 미만이 되지 않게.
+        span_ms = round((segments[j]["end"] - segments[i]["start"]) * 1000)
+        if (
+            count >= _REPEAT_BURST_MIN_SEGMENTS
+            and span_ms < round(_REPEAT_BURST_MAX_MEAN_SECONDS * 1000) * count
+        ):
+            drops[i + 1 : j + 1] = [True] * (count - 1)
+        i = j + 1
+    return drops
+
+
+def _filter_local_segments(srt_path: Path, text: str) -> tuple[str, dict]:
+    """R27-H5: 로컬 결과의 글과 `quality`(Groq `_filter_segments`와 같은 모양)를 돌려준다.
+
+    `.srt`가 없거나 읽지 못하면 거를 근거가 없다 — 글은 그대로, `segments`는 None(실패로 보지 않는다).
+    거른 구간이 없으면 글은 도구 `.txt` 그대로이고, 있으면 남은 구간 글을 줄바꿈으로 잇는다(도구 `.txt` 모양).
+    로컬에는 구간 신호가 없어 항목에 신호 키를 넣지 않는다.
+    """
+    try:
+        parsed = _parse_srt(srt_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        parsed = None
+    if not parsed:
+        return text, {"segments": None, "dropped": 0}
+    drops = _repeat_burst_drops(parsed)
+    segments: list[dict] = []
+    for seg, dropped in zip(parsed, drops):
+        item = {"start": seg["start"], "end": seg["end"], "dropped": dropped}
+        if dropped:
+            item["text"] = seg["text"]  # 오탐을 나중에 되살릴 수 있게 거른 구간 글만 남긴다
+            item["drop_reason"] = "repeat_burst"
+        segments.append(item)
+    dropped_count = sum(drops)
+    if dropped_count:
+        text = "\n".join(seg["text"] for seg, dropped in zip(parsed, drops) if not dropped).strip()
+    return text, {"segments": segments, "dropped": dropped_count}
+
+
 def _call_groq(
     upload_path: Path,
     *,
     api_key: str,
     model: str,
-    lang: str,
+    lang: str | None,
 ) -> dict:
     """Groq `/audio/transcriptions` 1회 호출(단일 모델). 성공 시 `{"text","model","quality"}`.
 
@@ -622,7 +727,7 @@ def _call_groq(
     return {"text": text, "model": model, "quality": quality}
 
 
-def _transcribe_groq(media_path: Path, *, lang: str) -> dict:
+def _transcribe_groq(media_path: Path, *, lang: str | None) -> dict:
     """Groq 무료 tier 전사 → `{"text","model","quality","backend":"groq"}`(R27-H1 `quality`).
 
     모델 순서: whisper-large-v3-turbo → whisper-large-v3(429 시에만 폴백).
@@ -683,7 +788,8 @@ def transcribe_media(
 ) -> dict:
     """오디오/영상 파일 → `{"text": str, "model": str, "backend": "local"|"groq"}`.
 
-    R27-H1: Groq 결과에는 `quality`(`_filter_segments`)가 더해진다. local 결과에는 없다(구간 신호 없음).
+    R27-H1: Groq 결과에는 `quality`(`_filter_segments`)가 더해진다. R27-H5: local 결과에도 같은 모양의
+    `quality`(`_filter_local_segments`, 묶음 반복만 — 구간 신호 없음)가 더해진다.
 
     사다리(round-27, 계약 정본): local whisper 우선 → local unavailable 또는
     per-item `TranscribeError` → Groq 무료 tier 폴백(가능 시) → 전부 불가면
@@ -691,8 +797,10 @@ def transcribe_media(
     `skipped_no_tool`로 degrade하는 것을 전제로 한다. 이 함수의 예외 계약은
     round-06과 동일 — dispatcher 내부 폴백은 이 함수를 벗어나지 않는다).
 
-    `lang` 미지정(None)이면 사용자 언어(SIPHER_LANG, OS locale 자동감지 —
-    `core.lang.resolve_lang`, round-20)를 쓴다. 명시 인자가 항상 우선(하위호환).
+    `lang` 미지정(None)이면 `SIPHER_TRANSCRIBE_LANG`(`_transcribe_lang`)을 쓰고, 그것도
+    없으면 언어를 정하지 않아 전사 엔진이 자동 감지한다. 명시 인자가 항상 우선(하위호환).
+    R27-H4: `SIPHER_LANG`(사용자가 읽는 언어)은 전사 언어로 쓰지 않는다 — 영어 녹음이
+    OS 로캘(ko)로 강제돼 한국어 번역·지어낸 문장·반복으로 나온 결함.
 
     `model`/`device`/`compute`는 local backend 전용 인자다(round-06 계승) — Groq
     폴백 시에는 무시된다(Groq는 자체 모델 사다리 turbo→v3를 쓴다, 계약 §사다리).
@@ -704,8 +812,7 @@ def transcribe_media(
     if not media_path.exists():
         raise TranscribeError(f"미디어 파일이 없습니다: {media_path}", reason="missing_file")
     if lang is None:
-        from .lang import resolve_lang  # 지연 import — 도구 부재 환경에서도 모듈 로드 가볍게
-        lang = resolve_lang()
+        lang = _transcribe_lang()
 
     local_ok = _local_is_available()
     groq_ok = _groq_is_available()

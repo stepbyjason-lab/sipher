@@ -81,9 +81,9 @@ credit card.
 |---|---|
 | **Threads** | Post body plus root-author follow-ups and full rich-text cards by default. Root-author follow-ups are returned in the author's posting-time order when source timestamps are available. Continuation resolution reports stderr progress and returns an honest `partial` result after its 45-second budget; use `--all-comments` for visible replies, `--auto` for conditional deep crawl, or `--deep` for the full reply tree. |
 | **YouTube** | Description, metadata, media, `--from-start` (live from the beginning), live-chat replay, optional transcript & comments. |
-| **Facebook** | Body, **full-size photos** (lightbox bypass + hidden `+N` shots), video, and **comment bodies** with honest confidence labels. `meta.post_kind` (`reel`, `video` or `post`, decided from the URL) and `meta.post_video_count` (videos inside the post itself; `null` when unknown) tell a photo post from a video post — `meta.video_count` still counts every video the page loaded, including recommended ones. |
-| **Instagram** | Caption, media, metadata. Login session required (Instagram blocks anonymous access) — reported honestly via access labels. |
-| **TikTok** | Caption, stats, metadata; optional video download. |
+| **Facebook** | Body, **full-size photos** (lightbox bypass + hidden `+N` shots), video, and **comment bodies** with honest confidence labels. `meta.post_kind` (`reel`, `video` or `post`, decided from the URL) and `meta.post_video_count` (videos inside the post itself; `null` when unknown) tell a photo post from a video post — `meta.video_count` still counts every video the page loaded, including recommended ones. Reels download as the full video track (highest quality) plus its audio track, as separate files. Only reel URLs (`/reel/<id>`) are downloaded this way — other DASH videos (`/videos/`, `/watch`) are not supported yet. |
+| **Instagram** | Caption, media, metadata. Login session required (Instagram blocks anonymous access) — reported honestly via access labels. If a session request gets an account warning (`feedback_required`, spam, 429, checkpoint, forced login), sipher writes `.sipher-auth/instagram-account-warning.lock` and stops; session requests stay blocked until you delete that file. |
+| **TikTok** | Caption, stats, metadata; optional video download. `--collector aside` is an opt-in, read-only collection through your Aside browser (no media download): it needs the `aside` CLI on `PATH` (or `SIPHER_ASIDE_EXE`) and a browser already logged in to TikTok. Keep it to **2 requests per account per day** (KST) — sipher keeps no counter, so track it yourself. It stops on login, captcha or account-warning screens. |
 | **X** | Post body, the author's own follow-up posts (`author_thread[]`), quoted posts (`quoted[]` — a quoted article comes with its title, cover and images), the author's replies and other users' replies (`comments[]`, each tagged `kind`), and original-resolution photos and video. Posting times come as `created_at_utc` (ISO 8601 UTC, `null` when unknown), and every `media_files[]` entry carries an `origin` (`self`, `quoted:<id>`, `comment:<id>`) so quoted or reply images are not read as the post's own. **X login cookies required** (`X_COOKIES_FILE`, see "Login files" below) — without them you get an explicit `AuthRequired` error, never an empty success. `--max-replies N` (default 100) caps other users' replies only. |
 | **Naver Blog** | Mobile-API listing + body + metadata + original-resolution images. (Pure standard library — zero dependencies.) |
 | **Any web article** | Generic fallback for anything the 7 platforms don't cover. Two-tier: fast static fetch → JS-rendered browser when the page is an SSR shell. Built-in SSRF defense. |
@@ -135,8 +135,11 @@ When a file fails, `meta.transcript_errors` lists it: `media_path`, a `reason`, 
 `segments`. When Groq returns per-segment signals (`no_speech_prob`, `avg_logprob`,
 `compression_ratio`), segments that the signals mark as non-speech are removed from the
 text, and they stay in `segments` with `dropped: true` and their text so you can restore
-one. If the response has no usable signals, or the local backend ran (it returns plain
-text only), nothing is removed and `segments` is `null`. A file whose text comes back
+one. If the response has no usable signals, nothing is removed and `segments` is `null`.
+The local backend has no per-segment signals; when its `.srt` is present it only removes
+repeat bursts (the same text in 3+ segments averaging under 0.2 s each — the first one is
+kept) and lists every segment in `segments`, removed ones with `drop_reason: "repeat_burst"`.
+If the `.srt` is missing or malformed, nothing is removed and `segments` is `null`. A file whose text comes back
 empty counts as `no_speech`.
 
 ### OCR failures: `meta.ocr_errors`
@@ -341,10 +344,11 @@ The pipeline is **language-agnostic** and adapts to you automatically:
 
 - **On first run, sipher detects your OS locale** and stores it as `SIPHER_LANG`
   in `.env.local` — edit it anytime (e.g. `SIPHER_LANG=en`, `ja`, `ko`).
-- Vision OCR and Whisper transcription follow this setting. Korean uses a
-  PoC-validated prompt; every other language gets a language-neutral one.
-- CLI help and `.env.example` are bilingual (English + Korean). Internal docs
-  are currently Korean (the tool itself works anywhere).
+- Vision OCR follows this setting. Korean uses a PoC-validated prompt; every
+  other language gets a language-neutral one.
+- Transcription detects the spoken language per file. To force one, set
+  `SIPHER_TRANSCRIBE_LANG` (e.g. `SIPHER_TRANSCRIBE_LANG=en`).
+- CLI help and `.env.example` are bilingual (English + Korean).
 
 ---
 

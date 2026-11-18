@@ -25,9 +25,12 @@ sipher-fb 영상 보강 — 자작 수집 도구 fb_video_refetch 골격 이식.
 """
 from __future__ import annotations
 
+import base64
+import json
 import logging
 import re
 from pathlib import Path
+from urllib.parse import unquote, urlsplit, urlunsplit
 from typing import TYPE_CHECKING
 
 from .refetch_images import _FOCUS_SCOPE_JS, _owner_token
@@ -70,6 +73,77 @@ def dedup_by_video_id(urls: list[str]) -> list[str]:
         seen.add(vid)
         out.append(u)
     return out
+
+
+# R01-H3: 릴스는 DASH 조각으로 오고 잡힌 주소마다 바이트 범위가 붙는다(첫 조각은 1KB 안팎).
+_BYTE_RANGE_KEYS = frozenset({"bytestart", "byteend"})
+_QUALITY_RE = re.compile(r"_q(\d+)")
+
+
+def _query_pairs(url: str) -> list[str]:
+    q = urlsplit(url).query
+    return q.split("&") if q else []
+
+
+def _has_byte_range(url: str) -> bool:
+    return any(p.partition("=")[0] in _BYTE_RANGE_KEYS for p in _query_pairs(url))
+
+
+def _strip_byte_range(url: str) -> str:
+    """바이트 범위 파라미터만 뗀다 — 서명(oh·oe 등) 나머지 쿼리는 글자 그대로 둔다."""
+    s = urlsplit(url)
+    kept = [p for p in _query_pairs(url) if p.partition("=")[0] not in _BYTE_RANGE_KEYS]
+    return urlunsplit(s._replace(query="&".join(kept)))
+
+
+def _efg_data(url: str) -> dict:
+    """efg(base64 JSON)를 읽지 못하면 빈 dict를 반환한다."""
+    for p in _query_pairs(url):
+        k, _, v = p.partition("=")
+        if k != "efg":
+            continue
+        raw = unquote(v)
+        try:
+            data = json.loads(base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)))
+        except ValueError:  # binascii.Error·UnicodeDecodeError·JSONDecodeError 모두 ValueError
+            return {}
+        return data if isinstance(data, dict) else {}
+    return {}
+
+
+def _vencode_tag(url: str) -> str:
+    """efg의 vencode_tag. 못 읽으면 빈 문자열."""
+    tag = _efg_data(url).get("vencode_tag")
+    return tag if isinstance(tag, str) else ""
+
+
+def select_download_urls(urls: list[str], final_url: str | None = None) -> list[str]:
+    """받을 주소. 범위 없는 주소는 그대로, 범위 붙은 DASH 트랙은 범위를 뗀 영상 1·음성 1만.
+
+    영상은 vencode_tag의 `_q<n>`이 가장 큰 트랙, 음성은 처음 잡힌 음성 트랙이다.
+    """
+    plain = [u for u in urls if not _has_byte_range(u)]
+    match = re.fullmatch(r"/reel/(\d+)/?", urlsplit(final_url or "").path)
+    reel_id = match.group(1) if match else None
+    audio = video = None
+    best = -1
+    for u in urls:
+        if not _has_byte_range(u):
+            continue
+        data = _efg_data(u)
+        track_id = data.get("video_id")
+        if reel_id is None or type(track_id) not in (int, str) or str(track_id) != reel_id:
+            continue
+        tag = data.get("vencode_tag")
+        tag = tag if isinstance(tag, str) else ""
+        if "audio" in tag:
+            audio = audio or u
+            continue
+        m = _QUALITY_RE.search(tag)
+        q = int(m.group(1)) if m else 0
+        if q > best:
+            best, video = q, u
+    return plain + [_strip_byte_range(u) for u in (video, audio) if u]
 
 
 def download_video(req: APIRequestContext, url: str, media_dir: Path,
@@ -255,10 +329,11 @@ def enrich_post_videos(ctx: BrowserContext, permalink: str, *,
     if video_urls:
         label = "network_capture" if any(video_id_from_url(u) in captured_ids for u in video_urls) else "dom_scan"
 
+    selected = select_download_urls(video_urls, final_url)
     local_videos: list[str] = []
     if media is not None and video_urls:
         ok = fail = 0
-        for u in video_urls:
+        for u in selected:
             sp, status = download_video(ctx.request, u, media)
             if sp:
                 local_videos.append(sp)

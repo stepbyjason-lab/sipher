@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from itertools import islice
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 __all__ = ["fetch", "parse_url", "normalize", "InstagramAccessError"]
 
@@ -74,6 +75,111 @@ CommentCollectionMode = Literal["not_requested", "first_only"]
 # 문제(round-10 독립 리뷰 P2). "session_failed"를 추가해 익명 차단과 로그인 세션
 # 실패(세션 만료 등)를 구조화된 라벨 레벨에서 구분한다.
 AccessLabel = Literal["ok", "anonymous_blocked", "session_failed"]
+
+# R09-H2: 11-07 세션 요청이 `400 feedback_required`(spam)를 받고도 멈추지 않아 계정이
+# 임시 잠겼다. 세션 요청이 계정 경고를 받으면 이 파일을 남기고 멈추며, 파일이 있으면
+# 세션 요청을 네트워크 전에 거절한다. 시간이 지나도 풀지 않는다 — 사용자가 지운다.
+_ACCOUNT_LOCK = _ROOT / ".sipher-auth" / "instagram-account-warning.lock"
+_ACCOUNT_WARNING = re.compile(
+    r"(?<![a-z0-9])(?:feedback_required|spam|checkpoint|challenge|login"
+    r"|too many requests|429(?![0-9]))",
+    re.IGNORECASE,
+)
+_UNLOCK_HINT = "사용자가 계정 상태를 확인한 뒤 이 파일을 지우면 풀립니다"
+
+
+def _check_account_lock() -> None:
+    """잠금 파일이 있으면 세션 요청을 내보내기 전에 거절한다."""
+    if not _ACCOUNT_LOCK.exists():
+        return
+    try:
+        detail = _ACCOUNT_LOCK.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        detail = f"(잠금 파일 읽기 실패: {e})"
+    raise InstagramAccessError(
+        f"instagram: 계정 경고 잠금 중이라 요청하지 않았습니다 — {_ACCOUNT_LOCK}\n"
+        f"{detail}\n{_UNLOCK_HINT}.",
+        access_label="session_failed",
+    )
+
+
+def _stop_if_account_warning(e: BaseException) -> None:
+    """세션 요청 예외가 계정 경고면 잠금 파일을 남기고 멈춘다. 아니면 아무것도 안 한다."""
+    if isinstance(e, InstagramAccessError):
+        raise e  # 응답 경계에서 이미 만든 잠금·원인·중단을 그대로 보존한다.
+    cause = f"{type(e).__name__}: {e}"
+    if not _ACCOUNT_WARNING.search(cause):
+        return
+    cause = cause[:300]
+    written = ""
+    try:
+        _ACCOUNT_LOCK.parent.mkdir(parents=True, exist_ok=True)
+        _ACCOUNT_LOCK.write_text(
+            f"{datetime.now(timezone.utc).isoformat()}\n{cause}\n{_UNLOCK_HINT}.\n",
+            encoding="utf-8",
+        )
+    except OSError as w:  # 잠금을 못 남겨도 멈추는 것은 그대로다
+        written = f" (잠금 파일 쓰기 실패: {w})"
+    raise InstagramAccessError(
+        f"instagram: 계정 경고를 받아 멈췄습니다 — {cause}\n"
+        f"잠금 파일: {_ACCOUNT_LOCK}{written}\n{_UNLOCK_HINT}.",
+        access_label="session_failed",
+    ) from e
+
+
+def _guard_session_responses(context) -> None:
+    """원 세션·복사 세션의 응답을 재시도·리다이렉트·정보 소실 전에 검사한다."""
+    stopped = None
+
+    def check_response(response, **kwargs):
+        nonlocal stopped
+        warning = "429 Too Many Requests" if response.status_code == 429 else ""
+        for url in (response.url, response.headers.get("Location", "")):
+            path = urlsplit(url or "").path
+            if re.match(r"/(?:accounts/login|challenge|checkpoint)(?:/|$)", path, re.I):
+                warning = "login" if path.lower().startswith("/accounts/login") else path.split("/")[1]
+        try:
+            data = response.json()
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            if data.get("spam") is True:
+                warning = "spam"
+            elif data.get("challenge") or data.get("checkpoint_url"):
+                warning = "challenge" if data.get("challenge") else "checkpoint"
+            else:
+                match = _ACCOUNT_WARNING.search(
+                    f"{data.get('message', '')} {data.get('error_type', '')}"
+                )
+                if match:
+                    warning = match.group()
+        if warning:
+            try:
+                # 본문·URL·쿠키 값 대신 확인된 경고 신호만 잠금에 남긴다.
+                _stop_if_account_warning(RuntimeError(f"Instagram 응답: {warning}"))
+            except InstagramAccessError as e:
+                stopped = e
+                raise
+        return response
+
+    def watch(session):
+        if check_response not in session.hooks["response"]:
+            session.hooks["response"].append(check_response)
+
+    get_json = context.get_json
+
+    def guarded_get_json(*args, **kwargs):
+        if stopped is not None:
+            raise stopped
+        session = kwargs.get("session") or (args[3] if len(args) > 3 else None)
+        watch(session if session is not None else context._session)
+        return get_json(*args, **kwargs)
+
+    # CSRF 보충 GET은 get_json 밖에서 원 세션으로 나간다.
+    watch(context._session)
+    # instaloader.copy_session은 hooks를 복사하지 않는다. GraphQL/iPhone의 실제
+    # 복사 세션이 get_json에 들어올 때 같은 감시를 연결한다(다른 컨텍스트는 그대로).
+    context.get_json = guarded_get_json
 
 
 class InstagramAccessError(RuntimeError):
@@ -135,6 +241,7 @@ def _build_context(session_file: str | Path | None):
     """
     import instaloader
 
+    session_file = session_file or _login_path("INSTAGRAM_SESSION_FILE")  # 인자가 우선
     L = instaloader.Instaloader(
         download_pictures=False,
         download_videos=False,
@@ -143,8 +250,9 @@ def _build_context(session_file: str | Path | None):
         download_comments=False,
         save_metadata=False,
         compress_json=False,
+        # R09-H2: 세션이면 429를 재시도하지 않고 첫 응답에서 멈춘다
+        fatal_status_codes=[429] if session_file else None,
     )
-    session_file = session_file or _login_path("INSTAGRAM_SESSION_FILE")  # 인자가 우선
     if session_file:
         session_path = Path(session_file)
         if not session_path.is_file():
@@ -158,6 +266,7 @@ def _build_context(session_file: str | Path | None):
             L.load_session_from_file(username, str(session_path))
         except Exception as e:  # instaloader가 다양한 예외를 던짐 — 정직하게 감싸서 재발생
             raise RuntimeError(f"instagram: session_file 로드 실패({session_path}): {e}") from e
+        _guard_session_responses(L.context)
     return L, instaloader
 
 
@@ -238,6 +347,7 @@ def _fetch_post_via_iphone_api(L, instaloader, code: str):
         _log.info("instagram: doc_id 실패 → iphone(api/v1/media/info) 폴백으로 조회 성공")
         return instaloader.Post.from_iphone_struct(L.context, items[0])
     except Exception as e:  # 폴백 실패는 원래 실패를 대체하지 않는다
+        _stop_if_account_warning(e)  # R09-H2: 계정 경고만은 삼키지 않는다(세션 전용 경로)
         _log.warning("instagram: iphone 폴백 실패(%s): %s", type(e).__name__, e)
         return None
 
@@ -288,7 +398,7 @@ def _collect_first_instagram_comment(post) -> list[dict]:
 
 
 def _resolve_instagram_comments(
-    post, comments: bool, instaloader_module,
+    post, comments: bool, instaloader_module, *, logged_in: bool = False,
 ) -> tuple[list[dict], CommentsLabel, CommentCollectionMode]:
     """comments 플래그 → (collected_comments, comments_label, comment_collection_mode).
 
@@ -319,11 +429,17 @@ def _resolve_instagram_comments(
     try:
         collected_comments = _collect_first_instagram_comment(post)
         comments_label = "collected"
-    except instaloader_module.exceptions.LoginRequiredException:
+    except instaloader_module.exceptions.LoginRequiredException as e:
+        if logged_in:
+            _stop_if_account_warning(e)
         comments_label = "login_required"
-    except instaloader_module.exceptions.ConnectionException:
+    except instaloader_module.exceptions.ConnectionException as e:
+        if logged_in:
+            _stop_if_account_warning(e)
         comments_label = "login_required"  # 익명 차단도 사실상 로그인 요구와 동일한 결과
     except Exception as e:  # 정직 degrade — 원인 로그는 남기되 fetch 자체는 죽이지 않음
+        if logged_in:
+            _stop_if_account_warning(e)
         _log.warning("instagram: 댓글 수집 실패(%s): %s", type(e).__name__, e)
         comments_label = "fetch_failed"
     return collected_comments, comments_label, comment_collection_mode
@@ -369,6 +485,8 @@ def fetch(
 
     # 인자가 없으면 INSTAGRAM_SESSION_FILE — 익명 판정(is_anonymous)과 같은 값을 써야 한다.
     session_file = session_file or _login_path("INSTAGRAM_SESSION_FILE")
+    if session_file:
+        _check_account_lock()  # R09-H2: 잠금 중이면 컨텍스트도 만들지 않는다
     L, instaloader = _build_context(session_file)
 
     # 로그인 세션 유무에 따라 실패 시 안내 메시지·access_label을 다르게 준다
@@ -388,6 +506,7 @@ def fetch(
                 f"프로필 쿠키(docs/00-overview.md §9)를 사용하세요: {e}",
                 access_label="anonymous_blocked",
             ) from e
+        _stop_if_account_warning(e)  # R09-H2: 경고면 폴백으로 더 요청하지 않는다
         post = _fetch_post_via_iphone_api(L, instaloader, code)
         if post is None:
             raise InstagramAccessError(
@@ -405,6 +524,7 @@ def fetch(
         # 로그인 세션(session_file)을 이미 사용 중인데도 LoginRequiredException이면
         # "익명이라 차단"이 아니라 세션 자체의 문제(만료·권한 부족 등)다 —
         # round-10 Post-Review Fix(P2): access_label을 재사용하지 않고 구분한다.
+        _stop_if_account_warning(e)  # R09-H2: 세션 중 로그인 요구는 계정 경고다
         raise InstagramAccessError(
             f"instagram: 로그인 세션 사용 중에도 로그인이 필요하다는 응답을 받았습니다 "
             f"(세션 만료 또는 이 포스트에 대한 권한 부족 가능성): {e}",
@@ -436,6 +556,12 @@ def fetch(
                 f"증상 — 죽은 doc_id 또는 세션 만료 가능성, iphone 폴백도 실패): {e}",
                 access_label="session_failed",
             ) from e
+    except Exception as e:
+        # R09-H2: feedback_required·checkpoint·로그아웃 리다이렉트·세션 429는 instaloader가
+        # AbortDownloadException(ConnectionException 아님)으로 올려 위 분기를 비켜 간다.
+        if not is_anonymous:
+            _stop_if_account_warning(e)
+        raise
 
     # round-B: comment_collection_mode는 comments_label과 별개 축 — "성공/실패"가
     # 아니라 "정책상 몇 개를 시도했는가"를 표시한다(계약 §고정 meta 필드명). 이
@@ -444,7 +570,9 @@ def fetch(
     # 호출하지 않는다는 것을 fetch() 전체를 mocking하지 않고도 단위 테스트할 수
     # 있게 하기 위함).
     collected_comments, comments_label, comment_collection_mode = (
-        _resolve_instagram_comments(post, comments, instaloader)
+        _resolve_instagram_comments(
+            post, comments, instaloader, logged_in=not is_anonymous
+        )
     )
 
     out_dir = str(media_dir) if media_dir else "downloads"
@@ -490,7 +618,11 @@ def _sidecar_nodes(post) -> list:
         return []
     try:
         return list(post.get_sidecar_nodes())
+    except InstagramAccessError:
+        raise
     except Exception as e:
+        if getattr(getattr(post, "_context", None), "is_logged_in", False):
+            _stop_if_account_warning(e)
         raise _SidecarEnumerationFailed(str(e)) from e
 
 
@@ -544,6 +676,8 @@ def _download_media(post, *, out_dir: str, code: str) -> list[str]:
         try:
             is_video = bool(post.is_video)
             url = post.video_url if is_video else post.url
+        except InstagramAccessError:
+            raise
         except Exception as e:
             _log.warning("instagram: 미디어 URL 조회 실패(%s): %s", type(e).__name__, e)
             return []

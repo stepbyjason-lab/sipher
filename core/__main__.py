@@ -118,6 +118,10 @@ def main(argv: list[str] | None = None) -> int:
             "명령줄 옵션이 .env.local보다 우선. X는 로그인 쿠키 필수 — 없거나 만료되면 AuthRequired 오류)."
         ))
     pf.add_argument("url", help="URL or local file path (URL 또는 로컬 파일 경로)")
+    pf.add_argument("--collector", choices=["aside"], default=None,
+                    help="(TikTok) opt-in read-only browser collection; no media download. "
+                         "Before use, operator must confirm remaining KST daily budget (2/account). "
+                         "(계정당 KST 하루 2회 잔여를 운영자가 확인; 불명확하면 실행 금지)")
     pf.add_argument("--json", action="store_true", dest="json_output",
                      help="print normalized JSON to stdout (정규화 JSON을 stdout에 출력)")
     pf.add_argument("--out", default=None, dest="out_file",
@@ -160,7 +164,9 @@ def main(argv: list[str] | None = None) -> int:
                           "(media_paths[] 이미지를 Gemini OCR로)")
     pf.add_argument("--transcribe", action=argparse.BooleanOptionalAction, default=None,
                      help="전사 강제 on/off(미지정=smart 위임, --no-transcribe로 opt-out) "
-                          "(오디오/영상을 로컬 whisper로)")
+                          "(오디오/영상을 로컬 whisper로). Spoken language is auto-detected per file; "
+                          "force it with SIPHER_TRANSCRIBE_LANG (e.g. en). "
+                          "(전사 언어는 파일마다 자동 감지, 강제하려면 SIPHER_TRANSCRIBE_LANG)")
     pf.add_argument("--whisper-model", default=None, dest="whisper_model",
                      help="(--transcribe) whisper model, tool default large-v3 "
                           "(whisper 모델명, 미지정 시 도구 기본값)")
@@ -225,6 +231,8 @@ def main(argv: list[str] | None = None) -> int:
     # 그대로 전달하면 옵션 미지원 어댑터(youtube에 --deep 등)가 TypeError를
     # 내므로, 사용자가 명시한 것만 kwargs로 구성한다.
     kwargs: dict = {}
+    if args.collector is not None:
+        kwargs["collector"] = args.collector
     if args.media_dir is not None:
         kwargs["media_dir"] = args.media_dir
     if args.download:
